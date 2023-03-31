@@ -1,0 +1,26 @@
+[package]
+name = "cln-nostr-connect"
+version = "0.1.0-ALPHA"
+edition = "2021"
+authors = ["thesimplekid"]
+license = "BSD-3-Clause"
+readme = "README.md"
+repository = "https://github.com/thesimplekid/cln-nostr-connect"
+description = "Core Lightning plugin for paying invoices with nostr connect (NIP47) **ALPHA**"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.69"
+log = "0.4"
+cln-plugin = "0.1.2"
+cln-rpc = "0.1.2"
+futures = "0.3.26"
+serde = "1"
+serde_json = "1"
+tokio = { version = "1.26.0", features = [ "full" ] }
+nostr-sdk = { version = "0.20.0", default_features = false, features = ["nip19", "nip04"] }
+tungstenite = { version = "0.18", features = ["rustls-tls-webpki-roots"]}
+dirs = "4.0"
+hex = "0.4.3"
+lightning-invoice = "0.22.0"
