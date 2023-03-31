@@ -1,16 +1,23 @@
 mod utils;
 
 use anyhow::{bail, Result};
+use log::info;
+
 use cln_plugin::options::{ConfigOption, Value};
 use cln_plugin::Plugin;
 use cln_rpc::model::{requests::PayRequest, Request, Response};
 use cln_rpc::primitives::{Amount, Secret};
+
 use futures::{Stream, StreamExt};
 use lightning_invoice::{Invoice, InvoiceDescription};
 use nostr_sdk::secp256k1::XOnlyPublicKey;
+
+use std::ops::Add;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use tokio::io::{stdin, stdout};
 
 use nostr_sdk::nips::nip04::decrypt;
@@ -18,8 +25,6 @@ use nostr_sdk::{event::Event, ClientMessage, EventBuilder, Filter, Kind, Subscri
 use nostr_sdk::{RelayMessage, Url};
 
 use tungstenite::{connect, Message as WsMessage};
-
-use log::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,8 +48,18 @@ async fn main() -> anyhow::Result<()> {
         ))
         .option(ConfigOption::new(
             "nostr_connect_max_invoice",
-            Value::Integer(1000000),
+            Value::Integer(50000000),
             "Max size of an invoice (msat)",
+        ))
+        .option(ConfigOption::new(
+            "nostr_connect_hour_limit",
+            Value::Integer(10000000),
+            "Max msats to spend per hour"
+        ))
+        .option(ConfigOption::new(
+            "nostr_connect_day_limit",
+            Value::Integer(35000000),
+            "Max msats to spend per day"
         ))
         .subscribe("shutdown",
             // Handle CLN `shutdown` if it is sent 
@@ -91,13 +106,32 @@ async fn main() -> anyhow::Result<()> {
         .expect("Option is a i64")
         .to_owned();
 
-    // Realy to listen for events and publish events to
+    let hour_limit = plugin
+        .option("nostr_connect_hour_limit")
+        .expect("Option is defined")
+        .as_i64()
+        .expect("Option is a i64")
+        .to_owned();
+
+    let day_limit = plugin
+        .option("nostr_connect_day_limit")
+        .expect("Option is defined")
+        .as_i64()
+        .expect("Option is a i64")
+        .to_owned();
+
+    // Relay to listen for events and publish events to
     let nostr_relay = Url::from_str(&nostr_relay)?;
 
     // pub key of client
     let nostr_pubkey = XOnlyPublicKey::from_str(&nostr_client_pubkey)?;
 
     let client = utils::create_client(&keys, vec![nostr_relay.to_string()]).await?;
+
+    let mut limits = Limits::new(
+        Amount::from_msat(hour_limit as u64),
+        Amount::from_sat(day_limit as u64),
+    );
 
     let mut invoices = event_stream(nostr_pubkey, nostr_relay).await?;
     while let Some(event) = invoices.next().await {
@@ -124,6 +158,21 @@ async fn main() -> anyhow::Result<()> {
             // Check amount is < then config max
             if amount.msat().gt(&(max_invoice_amount as u64)) {
                 bail!("Invoice too large: {amount:?} > {max_invoice_amount}")
+            }
+
+            // Check spend does not exceed daily or hourly limit
+            if limits.check_limit(amount).is_err() {
+                info!("Spend limit exceeded");
+                info!(
+                    "Hour limit: {:?}, Hour spend: {:?}",
+                    limits.hour_limit, limits.hour_value
+                );
+
+                info!(
+                    "Day limit: {:?}, Day Spend: {:?}",
+                    limits.day_limit, limits.day_value
+                );
+                continue;
             }
 
             // Currently there is some debate over whether the description hash should be known or before paying.
@@ -157,10 +206,15 @@ async fn main() -> anyhow::Result<()> {
 
             // Build event response
             let event_builder = match cln_response {
-                Ok(Response::Pay(res)) => create_succuss_note(res.payment_preimage),
+                Ok(Response::Pay(res)) => {
+                    // Add spend value to daily and hourly limit tracking
+                    limits.add_spend(amount);
+
+                    create_succuss_note(res.payment_preimage)
+                }
                 _ => {
                     info!("Payment failed: {}", event.id);
-                    create_failure_note("")
+                    create_failure_note("Payment failed")
                 }
             };
 
@@ -191,15 +245,13 @@ async fn event_stream(
 
     // Subscription filter
     let subscribe_to_requests = ClientMessage::new_req(
-        SubscriptionId::new("1234567"),
+        SubscriptionId::generate(),
         vec![Filter::new()
             .authors(vec![connect_client_pubkey])
             .kind(Kind::Custom(23194))],
     );
 
     socket.write_message(WsMessage::Text(subscribe_to_requests.as_json()))?;
-
-    info!("Waiting for requests");
 
     let socket = Arc::new(Mutex::new(socket));
 
@@ -225,4 +277,76 @@ async fn event_stream(
         }
     })
     .boxed())
+}
+
+struct Limits {
+    /// Unix time of hour start
+    hour_start: Instant,
+    /// Value sent in hour
+    hour_value: Amount,
+    /// Hour limit
+    hour_limit: Amount,
+    /// Unix time of day start
+    day_start: Instant,
+    /// Value sent in day
+    day_value: Amount,
+    /// Day limit
+    day_limit: Amount,
+}
+
+const SECONDS_IN_HOUR: Duration = Duration::new(3600, 0);
+const SECONDS_IN_DAY: Duration = Duration::new(86400, 0);
+
+impl Limits {
+    fn new(hour_limit: Amount, day_limit: Amount) -> Self {
+        Self {
+            hour_start: Instant::now(),
+            hour_value: Amount::from_msat(0),
+            hour_limit,
+            day_start: Instant::now(),
+            day_value: Amount::from_msat(0),
+            day_limit,
+        }
+    }
+
+    fn check_limit(&mut self, amount: Amount) -> Result<()> {
+        if self.hour_start.elapsed() > SECONDS_IN_HOUR {
+            self.reset_hour();
+        }
+
+        if self.day_start.elapsed() > SECONDS_IN_DAY {
+            self.reset_day();
+        }
+
+        if (self.day_value + amount).msat().gt(&self.day_limit.msat()) {
+            bail!("Daily spend limit exceeded")
+        }
+
+        if (self.hour_value + amount)
+            .msat()
+            .gt(&self.hour_limit.msat())
+        {
+            bail!("Hour spend limit exceeded")
+        }
+
+        Ok(())
+    }
+
+    fn reset_hour(&mut self) {
+        self.hour_value = Amount::from_msat(0);
+        self.hour_start = Instant::now();
+    }
+
+    fn reset_day(&mut self) {
+        self.day_value = Amount::from_msat(0);
+        self.day_start = Instant::now();
+    }
+
+    fn add_spend(&mut self, amount: Amount) {
+        // Add amount to hour spend
+        self.hour_value = self.hour_value.add(amount);
+
+        // Add amount to day spend
+        self.day_value = self.day_value.add(amount);
+    }
 }
