@@ -162,15 +162,17 @@ async fn main() -> anyhow::Result<()> {
 
             // Check spend does not exceed daily or hourly limit
             if limits.check_limit(amount).is_err() {
-                info!("Spend limit exceeded");
+                info!("Sending {} msat will exceed limit", amount.msat());
                 info!(
-                    "Hour limit: {:?}, Hour spend: {:?}",
-                    limits.hour_limit, limits.hour_value
+                    "Hour limit: {} msats, Hour spent: {} msats",
+                    limits.hour_limit.msat(),
+                    limits.hour_value.msat()
                 );
 
                 info!(
-                    "Day limit: {:?}, Day Spend: {:?}",
-                    limits.day_limit, limits.day_value
+                    "Day limit: {} msats, Day Spent: {} msats",
+                    limits.day_limit.msat(),
+                    limits.day_value.msat()
                 );
                 continue;
             }
@@ -280,13 +282,13 @@ async fn event_stream(
 }
 
 struct Limits {
-    /// Unix time of hour start
+    /// Instant of our start
     hour_start: Instant,
     /// Value sent in hour
     hour_value: Amount,
     /// Hour limit
     hour_limit: Amount,
-    /// Unix time of day start
+    /// Instant of day start
     day_start: Instant,
     /// Value sent in day
     day_value: Amount,
