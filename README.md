@@ -15,7 +15,7 @@ Since zap invoices include only description hash and the description is not curr
 ## Options
 `cln-nostr-connect` exposes the following config options that can be included in CLN's config file or as command line flags:
 * `nostr_connect_nsec`: Nostr Key to publish events from
-* `nostr_connect_client_pubkey`: The public key to accept requests from. This should not be your main pubkey, you should create a new as securely as possible as it can spend funds.  
+* `nostr_connect_client_pubkey`: The public key to accept requests from. This should not be your main pubkey, you should create a new keypair as securely as possible as it can authorize spending funds.  
 * `nostr_connect_relay`: Nostr relay to connect to. You should use a private relay with auth to reduce leaking metadata
 * `nostr_connect_max_invoice`: Max amount in msats of an invoice to pay. Defaults to 5000000
 * `nostr_connect_hour_limit`: Max msat to spend per hour. Defaults to 10,000,000.
