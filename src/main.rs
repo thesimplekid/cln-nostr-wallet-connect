@@ -1,7 +1,7 @@
 mod utils;
 
 use anyhow::{bail, Result};
-use log::info;
+use log::{info, warn};
 
 use cln_plugin::options::{ConfigOption, Value};
 use cln_plugin::Plugin;
@@ -139,7 +139,9 @@ async fn main() -> anyhow::Result<()> {
             RelayMessage::Auth { challenge } => {
                 if let Ok(auth_event) = EventBuilder::auth(challenge, relay.clone()).to_event(&keys)
                 {
-                    client.send_event(auth_event).await.ok();
+                    if let Err(err) = client.send_event(auth_event).await {
+                        warn!("Could not broadcast event: {err}");
+                    }
                 }
             }
             RelayMessage::Event {
@@ -159,9 +161,21 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 // Decrypt bolt11 from content (NIP04)
-                let content = decrypt(&keys.secret_key()?, &nostr_pubkey, event.content)?;
+                let content = match decrypt(&keys.secret_key()?, &nostr_pubkey, event.content) {
+                    Ok(content) => content,
+                    Err(err) => {
+                        info!("Could not decrypt: {err}");
+                        continue;
+                    }
+                };
 
-                let bolt11 = content.parse::<Invoice>()?;
+                let bolt11 = match content.parse::<Invoice>() {
+                    Ok(invoice) => invoice,
+                    Err(_err) => {
+                        info!("Could not parse invoice");
+                        continue;
+                    }
+                };
 
                 if let Some(amount) = bolt11.amount_milli_satoshis() {
                     let amount = Amount::from_msat(amount);
@@ -188,8 +202,8 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
 
-                    // Currently there is some debate over whether the description hash should be known or before paying.
-                    // The change in CLN requiring the description was reverted
+                    // Currently there is some debate over whether the description hash should be known or not before paying.
+                    // The change in CLN requiring the description was reverted but it is still deprecated
                     // With NIP47 as of now the description is unknown
                     // This may need to be reviewed in the future
                     // https://github.com/ElementsProject/lightning/pull/6092
@@ -231,9 +245,11 @@ async fn main() -> anyhow::Result<()> {
                         }
                     };
 
-                    let event = event_builder.to_event(&keys)?;
-
-                    client.send_event(event).await?;
+                    if let Ok(event) = event_builder.to_event(&keys) {
+                        if let Err(err) = client.send_event(event).await {
+                            warn!("Could not broadcast event: {}", err);
+                        }
+                    }
                 }
             }
             _ => continue,
