@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
 
 use nostr_sdk::nips::nip04::decrypt;
-use nostr_sdk::{event::Event, ClientMessage, EventBuilder, Filter, Kind, SubscriptionId};
+use nostr_sdk::{ClientMessage, EventBuilder, Filter, Kind, SubscriptionId};
 use nostr_sdk::{RelayMessage, Url};
 
 use tungstenite::{connect, Message as WsMessage};
@@ -121,108 +121,122 @@ async fn main() -> anyhow::Result<()> {
         .to_owned();
 
     // Relay to listen for events and publish events to
-    let nostr_relay = Url::from_str(&nostr_relay)?;
+    let relay = Url::from_str(&nostr_relay)?;
 
     // pub key of client
     let nostr_pubkey = XOnlyPublicKey::from_str(&nostr_client_pubkey)?;
 
-    let client = utils::create_client(&keys, vec![nostr_relay.to_string()]).await?;
+    let client = utils::create_client(&keys, vec![relay.to_string()]).await?;
 
     let mut limits = Limits::new(
         Amount::from_msat(hour_limit as u64),
         Amount::from_sat(day_limit as u64),
     );
 
-    let mut invoices = event_stream(nostr_pubkey, nostr_relay).await?;
-    while let Some(event) = invoices.next().await {
-        // Check event is valid
-        if event.verify().is_err() {
-            info!("Event {} is invalid", event.id.to_hex());
-            continue;
-        }
-
-        // Check event is from correct pubkey
-        if event.pubkey.ne(&nostr_pubkey) {
-            info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
-            continue;
-        }
-
-        // Decrypt bolt11 from content (NIP04)
-        let content = decrypt(&keys.secret_key()?, &nostr_pubkey, event.content)?;
-
-        let bolt11 = content.parse::<Invoice>()?;
-
-        if let Some(amount) = bolt11.amount_milli_satoshis() {
-            let amount = Amount::from_msat(amount);
-
-            // Check amount is < then config max
-            if amount.msat().gt(&(max_invoice_amount as u64)) {
-                bail!("Invoice too large: {amount:?} > {max_invoice_amount}")
-            }
-
-            // Check spend does not exceed daily or hourly limit
-            if limits.check_limit(amount).is_err() {
-                info!("Sending {} msat will exceed limit", amount.msat());
-                info!(
-                    "Hour limit: {} msats, Hour spent: {} msats",
-                    limits.hour_limit.msat(),
-                    limits.hour_value.msat()
-                );
-
-                info!(
-                    "Day limit: {} msats, Day Spent: {} msats",
-                    limits.day_limit.msat(),
-                    limits.day_value.msat()
-                );
-                continue;
-            }
-
-            // Currently there is some debate over whether the description hash should be known or before paying.
-            // The change in CLN requiring the description was reverted
-            // With NIP47 as of now the description is unknown
-            // This may need to be reviewed in the future
-            // https://github.com/ElementsProject/lightning/pull/6092
-            // https://github.com/ElementsProject/lightning/releases/tag/v23.02.2
-            let _description = match bolt11.description() {
-                InvoiceDescription::Direct(des) => des.to_string(),
-                InvoiceDescription::Hash(hash) => hash.0.to_string(),
-            };
-
-            // Send payment
-            let cln_response = cln_client
-                .call(Request::Pay(PayRequest {
-                    bolt11: bolt11.to_string(),
-                    amount_msat: None,
-                    label: None,
-                    riskfactor: None,
-                    maxfeepercent: None,
-                    retry_for: None,
-                    maxdelay: None,
-                    exemptfee: None,
-                    localinvreqid: None,
-                    exclude: None,
-                    maxfee: None,
-                    description: None,
-                }))
-                .await;
-
-            // Build event response
-            let event_builder = match cln_response {
-                Ok(Response::Pay(res)) => {
-                    // Add spend value to daily and hourly limit tracking
-                    limits.add_spend(amount);
-
-                    create_succuss_note(res.payment_preimage)
+    let mut events = event_stream(nostr_pubkey, relay.clone()).await?;
+    while let Some(msg) = events.next().await {
+        match msg {
+            RelayMessage::Auth { challenge } => {
+                if let Ok(auth_event) = EventBuilder::auth(challenge, relay.clone()).to_event(&keys)
+                {
+                    client.send_event(auth_event).await.ok();
                 }
-                _ => {
-                    info!("Payment failed: {}", event.id);
-                    create_failure_note("Payment failed")
+            }
+            RelayMessage::Event {
+                subscription_id: _,
+                event,
+            } => {
+                // Check event is valid
+                if event.verify().is_err() {
+                    info!("Event {} is invalid", event.id.to_hex());
+                    continue;
                 }
-            };
 
-            let event = event_builder.to_event(&keys)?;
+                // Check event is from correct pubkey
+                if event.pubkey.ne(&nostr_pubkey) {
+                    info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
+                    continue;
+                }
 
-            client.send_event(event).await?;
+                // Decrypt bolt11 from content (NIP04)
+                let content = decrypt(&keys.secret_key()?, &nostr_pubkey, event.content)?;
+
+                let bolt11 = content.parse::<Invoice>()?;
+
+                if let Some(amount) = bolt11.amount_milli_satoshis() {
+                    let amount = Amount::from_msat(amount);
+
+                    // Check amount is < then config max
+                    if amount.msat().gt(&(max_invoice_amount as u64)) {
+                        bail!("Invoice too large: {amount:?} > {max_invoice_amount}")
+                    }
+
+                    // Check spend does not exceed daily or hourly limit
+                    if limits.check_limit(amount).is_err() {
+                        info!("Sending {} msat will exceed limit", amount.msat());
+                        info!(
+                            "Hour limit: {} msats, Hour spent: {} msats",
+                            limits.hour_limit.msat(),
+                            limits.hour_value.msat()
+                        );
+
+                        info!(
+                            "Day limit: {} msats, Day Spent: {} msats",
+                            limits.day_limit.msat(),
+                            limits.day_value.msat()
+                        );
+                        continue;
+                    }
+
+                    // Currently there is some debate over whether the description hash should be known or before paying.
+                    // The change in CLN requiring the description was reverted
+                    // With NIP47 as of now the description is unknown
+                    // This may need to be reviewed in the future
+                    // https://github.com/ElementsProject/lightning/pull/6092
+                    // https://github.com/ElementsProject/lightning/releases/tag/v23.02.2
+                    let _description = match bolt11.description() {
+                        InvoiceDescription::Direct(des) => des.to_string(),
+                        InvoiceDescription::Hash(hash) => hash.0.to_string(),
+                    };
+
+                    // Send payment
+                    let cln_response = cln_client
+                        .call(Request::Pay(PayRequest {
+                            bolt11: bolt11.to_string(),
+                            amount_msat: None,
+                            label: None,
+                            riskfactor: None,
+                            maxfeepercent: None,
+                            retry_for: None,
+                            maxdelay: None,
+                            exemptfee: None,
+                            localinvreqid: None,
+                            exclude: None,
+                            maxfee: None,
+                            description: None,
+                        }))
+                        .await;
+
+                    // Build event response
+                    let event_builder = match cln_response {
+                        Ok(Response::Pay(res)) => {
+                            // Add spend value to daily and hourly limit tracking
+                            limits.add_spend(amount);
+
+                            create_succuss_note(res.payment_preimage)
+                        }
+                        _ => {
+                            info!("Payment failed: {}", event.id);
+                            create_failure_note("Payment failed")
+                        }
+                    };
+
+                    let event = event_builder.to_event(&keys)?;
+
+                    client.send_event(event).await?;
+                }
+            }
+            _ => continue,
         }
     }
 
@@ -242,7 +256,7 @@ fn create_failure_note(reason: &str) -> EventBuilder {
 async fn event_stream(
     connect_client_pubkey: XOnlyPublicKey,
     relay: Url,
-) -> Result<impl Stream<Item = Box<Event>>> {
+) -> Result<impl Stream<Item = RelayMessage>> {
     let (mut socket, _response) = connect(relay).expect("Can't connect");
 
     // Subscription filter
@@ -264,12 +278,11 @@ async fn event_stream(
                 .unwrap()
                 .read_message()
                 .expect("Error reading message");
-            let msg_text = msg.to_text().expect("Failed to conver message to text");
+            let msg_text = msg.to_text().expect("Failed to convert message to text");
             if let Ok(handled_message) = RelayMessage::from_json(msg_text) {
-                match handled_message {
-                    RelayMessage::Event { event, .. } => {
-                        info!("Got an event: {}", event.id);
-                        break Some((event, socket));
+                match &handled_message {
+                    RelayMessage::Event { .. } | RelayMessage::Auth { .. } => {
+                        break Some((handled_message, socket));
                     }
                     _ => continue,
                 }

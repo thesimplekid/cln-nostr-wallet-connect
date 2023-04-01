@@ -4,6 +4,8 @@
 // Distributed under the MIT software license
 
 use anyhow::Result;
+use log::info;
+
 use nostr_sdk::key::FromSkStr;
 use nostr_sdk::{Client, Keys};
 
@@ -16,7 +18,7 @@ pub fn handle_keys(private_key: Option<String>) -> Result<Keys> {
         }
         None => {
             // create a new identity with a new keypair
-            println!("No private key provided, creating new identity");
+            info!("No private key provided, creating new identity");
             Keys::generate()
         }
     };
