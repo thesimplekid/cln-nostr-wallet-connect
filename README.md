@@ -1,7 +1,7 @@
 # Core Lightning plugin for nostr wallet connect
 
 > **Warning**
-> This is an ALPHA implementation of relatively undiscussed **draft** [NIP47](https://github.com/getAlby/nips/blob/master/47.md), that has **both** privacy implications and risk of funds. You should not run this unless you understand those risks and ideally reviewed the code. 
+> This is an ALPHA implementation [NIP47](https://github.com/nostr-protocol/nips/blob/master/47.md), that has **both** privacy implications and risk of funds. You should not run this unless you understand those risks and ideally reviewed the code. 
 
 You can add the plugin by copying it to CLN's plugin directory or by adding the following line to your config file:
 
@@ -13,9 +13,9 @@ plugin=/path/to/nostr-wallet-connect
 Since zap invoices include only description hash and the description is not currently included in nip47 `allow-deprecated-apis=true` must be set. 
 
 ## Options
-`cln-nostr-connect` exposes the following config options that can be included in CLN's config file or as command line flags:
-* `nostr_connect_nsec`: Nostr Key to publish events from
-* `nostr_connect_client_pubkey`: The public key to accept requests from. This should not be your main pubkey, you should create a new keypair as securely as possible as it can authorize spending funds.  
+`cln-nostr-wallet-connect` exposes the following config options that can be included in CLN's config file or as command line flags:
+* `nostr_connect_wallet_nsec`: Nostr Key to publish events from
+* `nostr_connect_client_secret`: This should not be your main secret key, you should create a new keypair as securely as possible as it can authorize spending funds.  
 * `nostr_connect_relay`: Nostr relay to connect to. You should use a private relay with auth to reduce leaking metadata
 * `nostr_connect_max_invoice`: Max amount in msats of an invoice to pay. Defaults to 5000000
 * `nostr_connect_hour_limit`: Max msat to spend per hour. Defaults to 10,000,000.

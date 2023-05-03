@@ -10,7 +10,7 @@ use cln_rpc::primitives::{Amount, Secret};
 
 use futures::{Stream, StreamExt};
 use lightning_invoice::{Invoice, InvoiceDescription};
-use nostr_sdk::secp256k1::XOnlyPublicKey;
+use nostr_sdk::prelude::{encrypt, FromSkStr};
 
 use std::ops::Add;
 use std::path::PathBuf;
@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
 
 use nostr_sdk::nips::nip04::decrypt;
-use nostr_sdk::{ClientMessage, EventBuilder, Filter, Kind, SubscriptionId};
-use nostr_sdk::{RelayMessage, Url};
+use nostr_sdk::secp256k1::{SecretKey, XOnlyPublicKey};
+use nostr_sdk::{nips::nip47, ClientMessage, EventBuilder, Filter, Kind, SubscriptionId};
+use nostr_sdk::{Keys, RelayMessage, Tag, Url};
 
 use tungstenite::{connect, Message as WsMessage};
 
@@ -31,12 +32,12 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting cln-nostr-connect");
     let plugin = if let Some(plugin) = cln_plugin::Builder::new(stdin(), stdout())
         .option(ConfigOption::new(
-            "nostr_connect_nsec",
+            "nostr_connect_wallet_nsec",
             Value::String("".into()),
             "Nsec to publish success/failure events",
         ))
         .option(ConfigOption::new(
-            "nostr_connect_client_pubkey",
+            "nostr_connect_client_secret",
             Value::String("".into()),
             "Nostr pubkey to accept requests from",
         ))
@@ -80,13 +81,13 @@ async fn main() -> anyhow::Result<()> {
     let rpc_socket: PathBuf = plugin.configuration().rpc_file.parse()?;
     let mut cln_client = cln_rpc::ClnRpc::new(&rpc_socket).await?;
 
-    let keys = match plugin.option("nostr_connect_nsec") {
+    let keys = match plugin.option("nostr_connect_wallet_nsec") {
         Some(Value::String(nsec)) => utils::handle_keys(Some(nsec))?,
         _ => utils::handle_keys(None)?,
     };
 
-    let nostr_client_pubkey = plugin
-        .option("nostr_connect_client_pubkey")
+    let connect_client_secret = plugin
+        .option("nostr_connect_client_secret")
         .expect("Option is defined")
         .as_str()
         .expect("Option is a string")
@@ -123,17 +124,40 @@ async fn main() -> anyhow::Result<()> {
     // Relay to listen for events and publish events to
     let relay = Url::from_str(&nostr_relay)?;
 
-    // pub key of client
-    let nostr_pubkey = XOnlyPublicKey::from_str(&nostr_client_pubkey)?;
-
     let client = utils::create_client(&keys, vec![relay.to_string()]).await?;
+
+    let connect_client_keys = Keys::from_sk_str(&connect_client_secret)?;
+
+    info!(
+        "Client keys: pub {:?}, sec: {:?}",
+        connect_client_keys.public_key().to_string(),
+        connect_client_keys
+            .secret_key()?
+            .display_secret()
+            .to_string()
+    );
+
+    let wallet_connect_uri: nip47::NostrWalletConnectURI = nip47::NostrWalletConnectURI::new(
+        keys.public_key(),
+        relay.clone(),
+        Some(connect_client_keys.secret_key()?),
+    )?;
+
+    info!("{}", wallet_connect_uri.to_string());
+
+    // Publish Wallet Connect info
+    let info_event =
+        EventBuilder::new(Kind::WalletConnectInfo, "pay_invoice", &[]).to_event(&keys)?;
+
+    // Publish info Event
+    client.send_event(info_event).await?;
 
     let mut limits = Limits::new(
         Amount::from_msat(hour_limit as u64),
         Amount::from_sat(day_limit as u64),
     );
 
-    let mut events = event_stream(nostr_pubkey, relay.clone()).await?;
+    let mut events = event_stream(connect_client_keys.public_key(), relay.clone()).await?;
     while let Some(msg) = events.next().await {
         match msg {
             RelayMessage::Auth { challenge } => {
@@ -154,14 +178,21 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
+                info!("Got event: {:?}", serde_json::to_string_pretty(&event));
+
                 // Check event is from correct pubkey
-                if event.pubkey.ne(&nostr_pubkey) {
+                if event.pubkey.ne(&connect_client_keys.public_key()) {
+                    // TODO: Should respons with unauth
                     info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
                     continue;
                 }
 
                 // Decrypt bolt11 from content (NIP04)
-                let content = match decrypt(&keys.secret_key()?, &nostr_pubkey, event.content) {
+                let content = match decrypt(
+                    &keys.secret_key()?,
+                    &connect_client_keys.public_key(),
+                    event.content,
+                ) {
                     Ok(content) => content,
                     Err(err) => {
                         info!("Could not decrypt: {err}");
@@ -169,7 +200,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                let bolt11 = match content.parse::<Invoice>() {
+                info!("Decrypted Content: {:?}", content);
+
+                let request = nip47::Request::from_json(&content)?;
+                info!("request: {:?}", request);
+
+                let bolt11 = match request.params.invoice.parse::<Invoice>() {
                     Ok(invoice) => invoice,
                     Err(_err) => {
                         info!("Could not parse invoice");
@@ -237,11 +273,19 @@ async fn main() -> anyhow::Result<()> {
                             // Add spend value to daily and hourly limit tracking
                             limits.add_spend(amount);
 
-                            create_succuss_note(res.payment_preimage)
+                            create_succuss_note(
+                                &event.pubkey,
+                                &keys.secret_key()?,
+                                res.payment_preimage,
+                            )?
                         }
                         _ => {
                             info!("Payment failed: {}", event.id);
-                            create_failure_note("Payment failed")
+                            create_failure_note(
+                                &event.pubkey,
+                                &keys.secret_key()?,
+                                "Payment failed",
+                            )?
                         }
                     };
 
@@ -260,13 +304,49 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Build NIP47 success event
-fn create_succuss_note(preimage: Secret) -> EventBuilder {
-    EventBuilder::new(Kind::Custom(23195), hex::encode(preimage.to_vec()), &[])
+// TODO: add event note
+fn create_succuss_note(
+    connect_client_pubkey: &XOnlyPublicKey,
+    connect_sk: &SecretKey,
+    preimage: Secret,
+) -> Result<EventBuilder> {
+    let response = nip47::Response {
+        result_type: nip47::Method::PayInvoice,
+        error: None,
+        result: Some(nip47::ResponseResult {
+            preimage: hex::encode(preimage.to_vec()),
+        }),
+    };
+
+    let encrypted_response = encrypt(connect_sk, connect_client_pubkey, response.as_json());
+    Ok(EventBuilder::new(
+        Kind::WalletConnectResponse,
+        encrypted_response?,
+        &[Tag::PubKey(connect_client_pubkey.to_owned(), None)],
+    ))
 }
 
 /// Build NIP47 failure event
-fn create_failure_note(reason: &str) -> EventBuilder {
-    EventBuilder::new(Kind::Custom(23196), reason, &[])
+fn create_failure_note(
+    connect_client_pubkey: &XOnlyPublicKey,
+    connect_sk: &SecretKey,
+    reason: &str,
+) -> Result<EventBuilder> {
+    let response = nip47::Response {
+        result_type: nip47::Method::PayInvoice,
+        error: Some(nip47::NIP47Error {
+            code: nip47::ErrorCode::Internal,
+            message: reason.to_string(),
+        }),
+        result: None,
+    };
+
+    let encrypted_response = encrypt(connect_sk, connect_client_pubkey, response.as_json())?;
+    Ok(EventBuilder::new(
+        Kind::WalletConnectResponse,
+        encrypted_response,
+        &[Tag::PubKey(connect_client_pubkey.to_owned(), None)],
+    ))
 }
 
 async fn event_stream(
@@ -279,8 +359,8 @@ async fn event_stream(
     let subscribe_to_requests = ClientMessage::new_req(
         SubscriptionId::generate(),
         vec![Filter::new()
-            .authors(vec![connect_client_pubkey])
-            .kind(Kind::Custom(23194))],
+            .author(connect_client_pubkey.to_string())
+            .kind(Kind::WalletConnectRequest)],
     );
 
     socket.write_message(WsMessage::Text(subscribe_to_requests.as_json()))?;
