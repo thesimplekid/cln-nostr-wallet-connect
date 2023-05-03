@@ -15,6 +15,8 @@ jobs:
     steps:
     - name: Checkout Crate
       uses: actions/checkout@v3
+    - name: typos-action
+      uses: crate-ci/typos@v1.0.4
     - name: Set Toolchain
       # https://github.com/dtolnay/rust-toolchain
       uses: dtolnay/rust-toolchain@stable

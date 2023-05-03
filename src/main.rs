@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
 
                 // Check event is from correct pubkey
                 if event.pubkey.ne(&connect_client_keys.public_key()) {
-                    // TODO: Should respons with unauth
+                    // TODO: Should respond with unauth
                     info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
                     continue;
                 }

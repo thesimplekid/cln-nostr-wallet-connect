@@ -174,7 +174,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cln-nostr-connect"
+name = "cln-nostr-wallet-connect"
 version = "0.1.0-ALPHA"
 dependencies = [
  "anyhow",
@@ -644,7 +644,7 @@ dependencies = [
 [[package]]
 name = "nostr"
 version = "0.21.0"
-source = "git+https://github.com/thesimplekid/nostr?branch=nip47#dd7784127d750aef3d48954c54d80f5bc0e5d246"
+source = "git+https://github.com/thesimplekid/nostr?branch=nip47#ea7bd43fdc2816129f52b92d173486da3e9e13f8"
 dependencies = [
  "aes",
  "base64 0.21.0",
@@ -664,7 +664,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.21.0"
-source = "git+https://github.com/thesimplekid/nostr?branch=nip47#dd7784127d750aef3d48954c54d80f5bc0e5d246"
+source = "git+https://github.com/thesimplekid/nostr?branch=nip47#ea7bd43fdc2816129f52b92d173486da3e9e13f8"
 dependencies = [
  "gloo-timers",
  "log",
@@ -678,7 +678,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk-net"
 version = "0.21.0"
-source = "git+https://github.com/thesimplekid/nostr?branch=nip47#dd7784127d750aef3d48954c54d80f5bc0e5d246"
+source = "git+https://github.com/thesimplekid/nostr?branch=nip47#ea7bd43fdc2816129f52b92d173486da3e9e13f8"
 dependencies = [
  "futures-util",
  "thiserror",
