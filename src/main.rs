@@ -1,32 +1,31 @@
-mod utils;
-
-use anyhow::{bail, Result};
-use log::{info, warn};
-
-use cln_plugin::options::{ConfigOption, Value};
-use cln_plugin::Plugin;
-use cln_rpc::model::{requests::PayRequest, Request, Response};
-use cln_rpc::primitives::{Amount, Secret};
-
-use dirs::config_dir;
-use futures::{Stream, StreamExt};
-use lightning_invoice::{Invoice, InvoiceDescription};
-use nostr_sdk::prelude::encrypt;
-
 use std::ops::Add;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::io::{stdin, stdout};
-
-use nostr_sdk::nips::nip04::decrypt;
+use anyhow::{bail, Result};
+use cln_plugin::options::{ConfigOption, Value};
+use cln_plugin::Plugin;
+use cln_rpc::model::{requests::PayRequest, Request, Response};
+use cln_rpc::primitives::{Amount, Secret};
+use dirs::config_dir;
+use futures::{Stream, StreamExt};
+use lightning_invoice::{Invoice, InvoiceDescription};
+use log::{info, warn};
 use nostr_sdk::secp256k1::{SecretKey, XOnlyPublicKey};
-use nostr_sdk::{nips::nip47, ClientMessage, EventBuilder, Filter, Kind, SubscriptionId};
+use nostr_sdk::{
+    nips::{
+        nip04::{decrypt, encrypt},
+        nip47,
+    },
+    ClientMessage, EventBuilder, Filter, Kind, SubscriptionId,
+};
 use nostr_sdk::{RelayMessage, Tag, Url};
-
+use tokio::io::{stdin, stdout};
 use tungstenite::{connect, Message as WsMessage};
+
+mod utils;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

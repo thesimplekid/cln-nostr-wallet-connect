@@ -47,13 +47,13 @@ pub fn write_to_config(key: &str, value: &str, config_path: &PathBuf) -> std::io
 
     // Create the file if it doesn't exist
     if !config_path.exists() {
-        File::create(&config_path)?;
+        File::create(config_path)?;
     }
 
     let file = File::open(config_path)?;
     let reader = BufReader::new(file);
 
-    let mut lines = reader.lines();
+    let lines = reader.lines();
 
     // Create a new vector to hold the updated lines
     let mut updated_lines = Vec::new();
@@ -61,13 +61,13 @@ pub fn write_to_config(key: &str, value: &str, config_path: &PathBuf) -> std::io
     let mut key_found = false;
 
     // Loop through each line in the config file
-    while let Some(line) = lines.next() {
+    for line in lines {
         let line = line?;
 
         // Check if the line contains the key we're looking for
         if line.starts_with(&format!("{}=", key)) {
             // Update the value for the key
-            updated_lines.push(format!("{}={}\n", key, value));
+            updated_lines.push(format!("{}={}", key, value));
             key_found = true;
         } else {
             // Add the original line to the updated_lines vector
@@ -77,7 +77,7 @@ pub fn write_to_config(key: &str, value: &str, config_path: &PathBuf) -> std::io
 
     // If the key was not found in the config file, add it to the end
     if !key_found {
-        updated_lines.push(format!("{}={}\n", key, value));
+        updated_lines.push(format!("{}={}", key, value));
     }
 
     // Write the updated lines to the config file
@@ -94,10 +94,10 @@ pub fn read_from_config(key: &str, config_path: &PathBuf) -> Result<Option<Strin
     let file = File::open(config_path)?;
     let reader = BufReader::new(file);
 
-    let mut lines = reader.lines();
+    let lines = reader.lines();
 
     // Loop through each line in the config file
-    while let Some(line) = lines.next() {
+    for line in lines {
         let line = line?;
 
         // Check if the line contains the key we're looking for
@@ -110,4 +110,24 @@ pub fn read_from_config(key: &str, config_path: &PathBuf) -> Result<Option<Strin
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST: &str = "./test.txt";
+
+    #[test]
+    fn test_write_to_config() {
+        let path = PathBuf::from(TEST);
+        write_to_config("ONE", "Hello", &path).unwrap();
+        write_to_config("TWO", "World", &path).unwrap();
+
+        let one = read_from_config("ONE", &path).unwrap();
+        assert_eq!(one.unwrap(), "Hello");
+
+        let two = read_from_config("TWO", &path).unwrap();
+        assert_eq!(two.unwrap(), "World");
+    }
 }
