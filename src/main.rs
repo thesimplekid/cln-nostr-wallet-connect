@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Wallet key keys
     // If key is defuined in CLN config that is used if not checks if key in plugin config
-    // if no key found genrate a new ket and write to config
+    // if no key found generate a new key and write to config
     let keys = match plugin.option("nostr_connect_wallet_nsec") {
         Some(Value::String(wallet_nsec)) => utils::handle_keys(Some(wallet_nsec))?,
         _ => {
