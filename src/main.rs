@@ -8,9 +8,10 @@ use cln_plugin::Plugin;
 use cln_rpc::model::{requests::PayRequest, Request, Response};
 use cln_rpc::primitives::{Amount, Secret};
 
+use dirs::config_dir;
 use futures::{Stream, StreamExt};
 use lightning_invoice::{Invoice, InvoiceDescription};
-use nostr_sdk::prelude::{encrypt, FromSkStr};
+use nostr_sdk::prelude::encrypt;
 
 use std::ops::Add;
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ use tokio::io::{stdin, stdout};
 use nostr_sdk::nips::nip04::decrypt;
 use nostr_sdk::secp256k1::{SecretKey, XOnlyPublicKey};
 use nostr_sdk::{nips::nip47, ClientMessage, EventBuilder, Filter, Kind, SubscriptionId};
-use nostr_sdk::{Keys, RelayMessage, Tag, Url};
+use nostr_sdk::{RelayMessage, Tag, Url};
 
 use tungstenite::{connect, Message as WsMessage};
 
@@ -33,12 +34,12 @@ async fn main() -> anyhow::Result<()> {
     let plugin = if let Some(plugin) = cln_plugin::Builder::new(stdin(), stdout())
         .option(ConfigOption::new(
             "nostr_connect_wallet_nsec",
-            Value::String("".into()),
+            Value::OptString,
             "Nsec to publish success/failure events",
         ))
         .option(ConfigOption::new(
             "nostr_connect_client_secret",
-            Value::String("".into()),
+            Value::OptString,
             "Nostr pubkey to accept requests from",
         ))
         // TODO: Would be better to be a list
@@ -81,17 +82,55 @@ async fn main() -> anyhow::Result<()> {
     let rpc_socket: PathBuf = plugin.configuration().rpc_file.parse()?;
     let mut cln_client = cln_rpc::ClnRpc::new(&rpc_socket).await?;
 
+    let config_path = config_dir()
+        .unwrap()
+        .join("cln-nostr-wallet-connect")
+        .join("config");
+
+    info!("Nostr Wallet Connect Config: {:?}", config_path);
+
+    // Wallet key keys
+    // If key is defuined in CLN config that is used if not checks if key in plugin config
+    // if no key found genrate a new ket and write to config
     let keys = match plugin.option("nostr_connect_wallet_nsec") {
-        Some(Value::String(nsec)) => utils::handle_keys(Some(nsec))?,
-        _ => utils::handle_keys(None)?,
+        Some(Value::String(wallet_nsec)) => utils::handle_keys(Some(wallet_nsec))?,
+        _ => {
+            let wallet_nsec = match utils::read_from_config("WALLET_NSEC", &config_path) {
+                Ok(nsec) => nsec,
+                Err(_) => None,
+            };
+
+            let keys = utils::handle_keys(wallet_nsec)?;
+
+            utils::write_to_config(
+                "WALLET_NSEC",
+                &keys.secret_key()?.display_secret().to_string(),
+                &config_path,
+            )
+            .ok();
+            keys
+        }
     };
 
-    let connect_client_secret = plugin
-        .option("nostr_connect_client_secret")
-        .expect("Option is defined")
-        .as_str()
-        .expect("Option is a string")
-        .to_owned();
+    let connect_client_keys = match plugin.option("nostr_connect_client_secret") {
+        Some(Value::String(client_secret)) => utils::handle_keys(Some(client_secret))?,
+        _ => {
+            let client_secret = match utils::read_from_config("CLIENT_SECRET", &config_path) {
+                Ok(secret) => secret,
+                Err(_) => None,
+            };
+
+            let keys = utils::handle_keys(client_secret)?;
+
+            utils::write_to_config(
+                "CLIENT_SECRET",
+                &keys.secret_key()?.display_secret().to_string(),
+                &config_path,
+            )
+            .ok();
+            keys
+        }
+    };
 
     let nostr_relay = plugin
         .option("nostr_connect_relay")
@@ -125,17 +164,6 @@ async fn main() -> anyhow::Result<()> {
     let relay = Url::from_str(&nostr_relay)?;
 
     let client = utils::create_client(&keys, vec![relay.to_string()]).await?;
-
-    let connect_client_keys = Keys::from_sk_str(&connect_client_secret)?;
-
-    info!(
-        "Client keys: pub {:?}, sec: {:?}",
-        connect_client_keys.public_key().to_string(),
-        connect_client_keys
-            .secret_key()?
-            .display_secret()
-            .to_string()
-    );
 
     let wallet_connect_uri: nip47::NostrWalletConnectURI = nip47::NostrWalletConnectURI::new(
         keys.public_key(),
@@ -178,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                info!("Got event: {:?}", serde_json::to_string_pretty(&event));
+                // info!("Got event: {:?}", serde_json::to_string_pretty(&event));
 
                 // Check event is from correct pubkey
                 if event.pubkey.ne(&connect_client_keys.public_key()) {
@@ -200,10 +228,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                info!("Decrypted Content: {:?}", content);
+                // info!("Decrypted Content: {:?}", content);
 
                 let request = nip47::Request::from_json(&content)?;
-                info!("request: {:?}", request);
+                // info!("request: {:?}", request);
 
                 let bolt11 = match request.params.invoice.parse::<Invoice>() {
                     Ok(invoice) => invoice,
