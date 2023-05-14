@@ -21,7 +21,7 @@ use nostr_sdk::{
     },
     ClientMessage, EventBuilder, Filter, Kind, SubscriptionId,
 };
-use nostr_sdk::{RelayMessage, Tag, Url};
+use nostr_sdk::{EventId, RelayMessage, Tag, Url};
 use tokio::io::{stdin, stdout};
 use tungstenite::{connect, Message as WsMessage};
 
@@ -302,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
 
                             create_succuss_note(
                                 &event.pubkey,
+                                &event.id,
                                 &keys.secret_key()?,
                                 res.payment_preimage,
                             )?
@@ -310,6 +311,7 @@ async fn main() -> anyhow::Result<()> {
                             info!("Payment failed: {}", event.id);
                             create_failure_note(
                                 &event.pubkey,
+                                &event.id,
                                 &keys.secret_key()?,
                                 "Payment failed",
                             )?
@@ -334,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
 // TODO: add event note
 fn create_succuss_note(
     connect_client_pubkey: &XOnlyPublicKey,
+    request_id: &EventId,
     connect_sk: &SecretKey,
     preimage: Secret,
 ) -> Result<EventBuilder> {
@@ -349,13 +352,17 @@ fn create_succuss_note(
     Ok(EventBuilder::new(
         Kind::WalletConnectResponse,
         encrypted_response?,
-        &[Tag::PubKey(connect_client_pubkey.to_owned(), None)],
+        &[
+            Tag::PubKey(connect_client_pubkey.to_owned(), None),
+            Tag::Event(request_id.to_owned(), None, None),
+        ],
     ))
 }
 
 /// Build NIP47 failure event
 fn create_failure_note(
     connect_client_pubkey: &XOnlyPublicKey,
+    request_id: &EventId,
     connect_sk: &SecretKey,
     reason: &str,
 ) -> Result<EventBuilder> {
@@ -372,7 +379,10 @@ fn create_failure_note(
     Ok(EventBuilder::new(
         Kind::WalletConnectResponse,
         encrypted_response,
-        &[Tag::PubKey(connect_client_pubkey.to_owned(), None)],
+        &[
+            Tag::PubKey(connect_client_pubkey.to_owned(), None),
+            Tag::Event(request_id.to_owned(), None, None),
+        ],
     ))
 }
 
