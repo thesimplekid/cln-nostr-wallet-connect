@@ -294,26 +294,37 @@ async fn main() -> anyhow::Result<()> {
                         }))
                         .await;
 
+                    info!("CLN res: {:?}", cln_response);
+
                     // Build event response
                     let event_builder = match cln_response {
                         Ok(Response::Pay(res)) => {
                             // Add spend value to daily and hourly limit tracking
                             limits.add_spend(amount);
 
-                            create_succuss_note(
+                            create_success_note(
                                 &event.pubkey,
                                 &event.id,
                                 &keys.secret_key()?,
                                 res.payment_preimage,
                             )?
                         }
-                        _ => {
-                            info!("Payment failed: {}", event.id);
+                        Err(err) => {
+                            info!("Payment failed: {}, RPC Error: {}", event.id, err);
                             create_failure_note(
                                 &event.pubkey,
                                 &event.id,
                                 &keys.secret_key()?,
-                                "Payment failed",
+                                "Rpc error",
+                            )?
+                        }
+                        Ok(res) => {
+                            info!("Payment failed: {}: res: {:?}", event.id, res);
+                            create_failure_note(
+                                &event.pubkey,
+                                &event.id,
+                                &keys.secret_key()?,
+                                "Unexpected Response",
                             )?
                         }
                     };
@@ -334,7 +345,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Build NIP47 success event
 // TODO: add event note
-fn create_succuss_note(
+fn create_success_note(
     connect_client_pubkey: &XOnlyPublicKey,
     request_id: &EventId,
     connect_sk: &SecretKey,
