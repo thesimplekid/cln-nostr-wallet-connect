@@ -1,7 +1,8 @@
+use std::net::TcpStream;
 use std::ops::Add;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -23,7 +24,9 @@ use nostr_sdk::{
 };
 use nostr_sdk::{EventId, RelayMessage, Tag, Url};
 use tokio::io::{stdin, stdout};
-use tungstenite::{connect, Message as WsMessage};
+use tokio::sync::Mutex;
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{connect, Message as WsMessage, WebSocket};
 
 mod utils;
 
@@ -386,44 +389,94 @@ fn create_failure_note(
     ))
 }
 
+async fn connect_relay(
+    url: Url,
+    connect_client_pubkey: &XOnlyPublicKey,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
+    let max_retries = 500;
+    let mut delay = Duration::from_secs(10);
+
+    for _ in 0..max_retries {
+        if let Ok((mut socket, _response)) = connect(url.clone()) {
+            // Subscription filter
+            let subscribe_to_requests = ClientMessage::new_req(
+                SubscriptionId::generate(),
+                vec![Filter::new()
+                    .author(connect_client_pubkey.to_string())
+                    .kind(Kind::WalletConnectRequest)],
+            );
+
+            socket.write_message(WsMessage::Text(subscribe_to_requests.as_json()))?;
+
+            return Ok(socket);
+        } else {
+            info!("Attempted connection to {} failed", url);
+        }
+
+        if max_retries == 100 {
+            delay = Duration::from_secs(30);
+        }
+
+        tokio::time::sleep(delay).await;
+    }
+
+    bail!("Relay connection attempts exceeded");
+}
+
 async fn event_stream(
     connect_client_pubkey: XOnlyPublicKey,
     relay: Url,
 ) -> Result<impl Stream<Item = RelayMessage>> {
-    let (mut socket, _response) = connect(relay).expect("Can't connect");
-
-    // Subscription filter
-    let subscribe_to_requests = ClientMessage::new_req(
-        SubscriptionId::generate(),
-        vec![Filter::new()
-            .author(connect_client_pubkey.to_string())
-            .kind(Kind::WalletConnectRequest)],
-    );
-
-    socket.write_message(WsMessage::Text(subscribe_to_requests.as_json()))?;
+    let socket = connect_relay(relay.clone(), &connect_client_pubkey).await?;
 
     let socket = Arc::new(Mutex::new(socket));
 
-    Ok(futures::stream::unfold(socket, |socket| async move {
-        loop {
-            let msg = socket
-                .lock()
-                .unwrap()
-                .read_message()
-                .expect("Error reading message");
-            let msg_text = msg.to_text().expect("Failed to convert message to text");
-            if let Ok(handled_message) = RelayMessage::from_json(msg_text) {
-                match &handled_message {
-                    RelayMessage::Event { .. } | RelayMessage::Auth { .. } => {
-                        break Some((handled_message, socket));
+    Ok(futures::stream::unfold(
+        (socket, relay, connect_client_pubkey),
+        |(mut socket, relay, connect_client_pubkey)| async move {
+            loop {
+                let msg = match socket.clone().lock().await.read_message() {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        // Handle disconnection
+                        info!("WebSocket disconnected: {}", err);
+                        info!("Attempting to reconnect ...");
+                        match connect_relay(relay.clone(), &connect_client_pubkey).await {
+                            Ok(new_socket) => socket = Arc::new(Mutex::new(new_socket)),
+                            Err(err) => {
+                                info!("{}", err);
+                                return None;
+                            }
+                        }
+
+                        continue;
                     }
-                    _ => continue,
+                };
+
+                let msg_text = match msg.to_text() {
+                    Ok(msg_test) => msg_test,
+                    Err(_) => {
+                        info!("Failed to convert message to text");
+                        continue;
+                    }
+                };
+
+                if let Ok(handled_message) = RelayMessage::from_json(msg_text) {
+                    match &handled_message {
+                        RelayMessage::Event { .. } | RelayMessage::Auth { .. } => {
+                            break Some((
+                                handled_message,
+                                (socket, relay.clone(), connect_client_pubkey),
+                            ));
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    info!("Got unexpected message: {}", msg_text);
                 }
-            } else {
-                info!("Got unexpected message: {}", msg_text);
             }
-        }
-    })
+        },
+    )
     .boxed())
 }
 
