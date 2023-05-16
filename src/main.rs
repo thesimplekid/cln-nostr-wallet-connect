@@ -396,7 +396,7 @@ async fn connect_relay(
     let max_retries = 500;
     let mut delay = Duration::from_secs(10);
 
-    for _ in 0..max_retries {
+    for attempt in 0..max_retries {
         if let Ok((mut socket, _response)) = connect(url.clone()) {
             // Subscription filter
             let subscribe_to_requests = ClientMessage::new_req(
@@ -413,7 +413,7 @@ async fn connect_relay(
             info!("Attempted connection to {} failed", url);
         }
 
-        if max_retries == 100 {
+        if attempt == 99 {
             delay = Duration::from_secs(30);
         }
 
