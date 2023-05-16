@@ -303,20 +303,32 @@ async fn main() -> anyhow::Result<()> {
                             // Add spend value to daily and hourly limit tracking
                             limits.add_spend(amount);
 
-                            create_succuss_note(
+                            create_success_note(
                                 &event.pubkey,
                                 &event.id,
                                 &keys.secret_key()?,
                                 res.payment_preimage,
                             )?
                         }
-                        _ => {
-                            info!("Payment failed: {}", event.id);
+                        Err(err) => {
+                            info!("Payment failed: {}, RPC Error: {}", event.id, err);
                             create_failure_note(
                                 &event.pubkey,
                                 &event.id,
                                 &keys.secret_key()?,
-                                "Payment failed",
+                                "CL RPC Error",
+                            )?
+                        }
+                        Ok(res) => {
+                            info!(
+                                "Payment failed: {}: Unexpected CL response: {:?}",
+                                event.id, res
+                            );
+                            create_failure_note(
+                                &event.pubkey,
+                                &event.id,
+                                &keys.secret_key()?,
+                                "CL Unexpected Response",
                             )?
                         }
                     };
@@ -336,8 +348,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Build NIP47 success event
-// TODO: add event note
-fn create_succuss_note(
+fn create_success_note(
     connect_client_pubkey: &XOnlyPublicKey,
     request_id: &EventId,
     connect_sk: &SecretKey,
