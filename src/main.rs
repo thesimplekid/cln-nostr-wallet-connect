@@ -198,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
         EventBuilder::new(Kind::WalletConnectInfo, "pay_invoice", &[]).to_event(&keys)?;
 
     // Publish info Event
-    client.send_event(info_event).await?;
+    client.send_event(info_event.clone()).await?;
 
     let mut limits = Limits::new(
         Amount::from_msat(hour_limit as u64),
@@ -209,10 +209,14 @@ async fn main() -> anyhow::Result<()> {
     while let Some(msg) = events.next().await {
         match msg {
             RelayMessage::Auth { challenge } => {
+                info!("Auth Challege: {challenge}");
                 if let Ok(auth_event) = EventBuilder::auth(challenge, relay.clone()).to_event(&keys)
                 {
                     if let Err(err) = client.send_event(auth_event).await {
                         warn!("Could not broadcast event: {err}");
+                    } else {
+                        // Publish info Event
+                        client.send_event(info_event.clone()).await?;
                     }
                 }
             }
@@ -251,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
                 // info!("Decrypted Content: {:?}", content);
 
                 let request = nip47::Request::from_json(&content)?;
-                // info!("request: {:?}", request);
+                info!("request: {:?}", request);
 
                 let bolt11 = match request.params.invoice.parse::<Invoice>() {
                     Ok(invoice) => invoice,
@@ -266,7 +270,8 @@ async fn main() -> anyhow::Result<()> {
 
                     // Check amount is < then config max
                     if amount.msat().gt(&(max_invoice_amount as u64)) {
-                        bail!("Invoice too large: {amount:?} > {max_invoice_amount}")
+                        info!("Invoice too large: {amount:?} > {max_invoice_amount}");
+                        continue;
                     }
 
                     // Check spend does not exceed daily or hourly limit
@@ -297,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
                         InvoiceDescription::Hash(hash) => hash.0.to_string(),
                     };
 
+                    info!("CL RPC Request: {:?}, {}", event.id, bolt11);
                     // Send payment
                     let cln_response = cln_client
                         .call(Request::Pay(PayRequest {
@@ -315,11 +321,14 @@ async fn main() -> anyhow::Result<()> {
                         }))
                         .await;
 
+                    info!("CL RPC Response: {:?}", cln_response);
+
                     // Build event response
                     let event_builder = match cln_response {
                         Ok(Response::Pay(res)) => {
                             // Add spend value to daily and hourly limit tracking
                             limits.add_spend(amount);
+                            info!("Payment sucess: {}", event.id);
 
                             create_success_note(
                                 &event.pubkey,
@@ -355,6 +364,8 @@ async fn main() -> anyhow::Result<()> {
                         if let Err(err) = client.send_event(event).await {
                             warn!("Could not broadcast event: {}", err);
                         }
+                    } else {
+                        info!("Could not create event");
                     }
                 }
             }
