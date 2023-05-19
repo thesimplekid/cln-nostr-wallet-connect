@@ -171,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
         keys.public_key(),
         relay.clone(),
         Some(connect_client_keys.secret_key()?),
+        None,
     )?;
 
     info!("{}", wallet_connect_uri.to_string());
