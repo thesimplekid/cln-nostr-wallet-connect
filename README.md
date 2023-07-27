@@ -20,7 +20,7 @@ Since zap invoices include only description hash and the description is not curr
 * `nostr_connect_max_invoice`: Max amount in msats of an invoice to pay. Defaults to 5000000
 * `nostr_connect_hour_limit`: Max msat to spend per hour. Defaults to 10,000,000.
 * `nostr_connect_day_limit`: Max msat to spend per day. Defaults to 35000000
-* `nostr_connect_config_path`: Path to configuration file. Defualts to data directory
+* `nostr_connect_config_path`: Path to configuration file. Defaults to data directory
 
 ## License
 
