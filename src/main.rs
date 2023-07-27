@@ -31,6 +31,12 @@ use tungstenite::{connect, Message as WsMessage, WebSocket};
 mod utils;
 
 // Config Names
+const WALLET_NSEC: &str = "nostr_connect_wallet_nsec";
+const CLIENT_SECRET: &str = "nostr_connect_client_secret";
+const RELAY: &str = "nostr_connect_relay";
+const MAX_INVOICE: &str = "nostr_connect_max_invoice";
+const HOUR_LIMIT: &str = "nostr_connect_hour_limit";
+const DAY_LIMIT: &str = "nostr_connect_day_limit";
 const CONFIG_PATH: &str = "nostr_connect_config_path";
 
 #[tokio::main]
@@ -38,33 +44,33 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting cln-nostr-connect");
     let plugin = if let Some(plugin) = cln_plugin::Builder::new(stdin(), stdout())
         .option(ConfigOption::new(
-            "nostr_connect_wallet_nsec",
+            WALLET_NSEC,
             Value::OptString,
             "Nsec to publish success/failure events",
         ))
         .option(ConfigOption::new(
-            "nostr_connect_client_secret",
+            CLIENT_SECRET,
             Value::OptString,
             "Nostr pubkey to accept requests from",
         ))
         // TODO: Would be better to be a list
         .option(ConfigOption::new(
-            "nostr_connect_relay",
+            RELAY,
             Value::String("ws://localhost:8080".to_string()),
             "Default nostr relay",
         ))
         .option(ConfigOption::new(
-            "nostr_connect_max_invoice",
+            MAX_INVOICE,
             Value::Integer(50000000),
             "Max size of an invoice (msat)",
         ))
         .option(ConfigOption::new(
-            "nostr_connect_hour_limit",
+            HOUR_LIMIT,
             Value::Integer(10000000),
             "Max msats to spend per hour"
         ))
         .option(ConfigOption::new(
-            "nostr_connect_day_limit",
+            DAY_LIMIT,
             Value::Integer(35000000),
             "Max msats to spend per day"
         ))
@@ -105,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
     // Wallet key keys
     // If key is defined in CLN config that is used if not checks if key in plugin config
     // if no key found generate a new key and write to config
-    let keys = match plugin.option("nostr_connect_wallet_nsec") {
+    let keys = match plugin.option(WALLET_NSEC) {
         Some(Value::String(wallet_nsec)) => utils::handle_keys(Some(wallet_nsec))?,
         _ => {
             let wallet_nsec = match utils::read_from_config("WALLET_NSEC", &config_path) {
@@ -125,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let connect_client_keys = match plugin.option("nostr_connect_client_secret") {
+    let connect_client_keys = match plugin.option(CLIENT_SECRET) {
         Some(Value::String(client_secret)) => utils::handle_keys(Some(client_secret))?,
         _ => {
             let client_secret = match utils::read_from_config("CLIENT_SECRET", &config_path) {
@@ -146,28 +152,28 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let nostr_relay = plugin
-        .option("nostr_connect_relay")
+        .option(RELAY)
         .expect("Option is defined")
         .as_str()
         .expect("Option is a string")
         .to_owned();
 
     let max_invoice_amount = plugin
-        .option("nostr_connect_max_invoice")
+        .option(MAX_INVOICE)
         .expect("Option is defined")
         .as_i64()
         .expect("Option is a i64")
         .to_owned();
 
     let hour_limit = plugin
-        .option("nostr_connect_hour_limit")
+        .option(HOUR_LIMIT)
         .expect("Option is defined")
         .as_i64()
         .expect("Option is a i64")
         .to_owned();
 
     let day_limit = plugin
-        .option("nostr_connect_day_limit")
+        .option(DAY_LIMIT)
         .expect("Option is defined")
         .as_i64()
         .expect("Option is a i64")
