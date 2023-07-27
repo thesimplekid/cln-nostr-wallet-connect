@@ -30,6 +30,9 @@ use tungstenite::{connect, Message as WsMessage, WebSocket};
 
 mod utils;
 
+// Config Names
+const CONFIG_PATH: &str = "nostr_connect_config_path";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     info!("Starting cln-nostr-connect");
@@ -65,6 +68,11 @@ async fn main() -> anyhow::Result<()> {
             Value::Integer(35000000),
             "Max msats to spend per day"
         ))
+        .option(ConfigOption::new(
+            CONFIG_PATH,
+            Value::OptString,
+            "Nostr wallet connect config path",
+        ))
         .subscribe("shutdown",
             // Handle CLN `shutdown` if it is sent 
             |plugin: Plugin<()>, _: serde_json::Value| async move {
@@ -84,15 +92,18 @@ async fn main() -> anyhow::Result<()> {
     let rpc_socket: PathBuf = plugin.configuration().rpc_file.parse()?;
     let mut cln_client = cln_rpc::ClnRpc::new(&rpc_socket).await?;
 
-    let config_path = config_dir()
-        .unwrap()
-        .join("cln-nostr-wallet-connect")
-        .join("config");
+    let config_path = match plugin.option(CONFIG_PATH) {
+        Some(Value::String(config_path)) => PathBuf::from_str(&config_path)?,
+        _ => config_dir()
+            .unwrap()
+            .join("cln-nostr-wallet-connect")
+            .join("config"),
+    };
 
     info!("Nostr Wallet Connect Config: {:?}", config_path);
 
     // Wallet key keys
-    // If key is defuined in CLN config that is used if not checks if key in plugin config
+    // If key is defined in CLN config that is used if not checks if key in plugin config
     // if no key found generate a new key and write to config
     let keys = match plugin.option("nostr_connect_wallet_nsec") {
         Some(Value::String(wallet_nsec)) => utils::handle_keys(Some(wallet_nsec))?,
