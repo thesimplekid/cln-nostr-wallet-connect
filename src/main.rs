@@ -643,6 +643,7 @@ async fn event_stream(
                     }
                 } else {
                     info!("Got unexpected message: {}", msg_text);
+                    info!("Got unexpected message: {:?}", msg);
                 }
             }
         },
