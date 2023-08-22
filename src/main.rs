@@ -282,7 +282,7 @@ async fn main() -> anyhow::Result<()> {
                 let event_builder = match event_builder {
                     Ok(event_builder) => {
                         // Add spend value to daily and hourly limit tracking
-                        info!("Payment sucess: {}", event.id);
+                        info!("Payment success: {}", event.id);
                         event_builder
                     }
                     Err(err) => {
@@ -420,7 +420,7 @@ async fn handle_pay_invoice(
                 limits.day_limit.msat(),
                 limits.day_value.msat()
             );
-            bail!("Limits exceded");
+            bail!("Limits exceeded");
         }
 
         // Currently there is some debate over whether the description hash should be known or not before paying.
