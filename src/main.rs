@@ -627,18 +627,27 @@ async fn event_stream(
                     }
                 };
 
-                if let Ok(handled_message) = RelayMessage::from_json(msg_text) {
-                    match &handled_message {
-                        RelayMessage::Event { .. } | RelayMessage::Auth { .. } => {
-                            break Some((
-                                handled_message,
-                                (socket, relay.clone(), connect_client_pubkey),
-                            ));
-                        }
-                        _ => continue,
-                    }
+                if msg.is_ping() {
+                    socket
+                        .lock()
+                        .await
+                        .write_message(WsMessage::Pong(vec![]))
+                        .ok();
                 } else {
-                    info!("Got unexpected message: {}", msg_text);
+                    if let Ok(handled_message) = RelayMessage::from_json(msg_text) {
+                        match &handled_message {
+                            RelayMessage::Event { .. } | RelayMessage::Auth { .. } => {
+                                break Some((
+                                    handled_message,
+                                    (socket, relay.clone(), connect_client_pubkey),
+                                ));
+                            }
+                            _ => continue,
+                        }
+                    } else {
+                        info!("Got unexpected message: {}", msg_text);
+                        info!("Got unexpected message: {:?}", msg);
+                    }
                 }
             }
         },
