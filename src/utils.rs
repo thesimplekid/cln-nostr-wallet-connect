@@ -32,7 +32,7 @@ pub fn handle_keys(private_key: Option<String>) -> Result<Keys> {
 // Creates the websocket client that is used for communicating with relays
 pub async fn create_client(keys: &Keys, relays: Vec<String>) -> Result<Client> {
     let client = Client::new(keys);
-    let relays = relays.iter().map(|url| (url, None)).collect();
+    let relays = relays.iter().map(|url| (url.clone(), None)).collect();
     client.add_relays(relays).await?;
     client.connect().await;
     Ok(client)
