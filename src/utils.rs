@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use log::info;
 
 use nostr_sdk::key::FromSkStr;
@@ -38,9 +38,12 @@ pub async fn create_client(keys: &Keys, relays: Vec<String>) -> Result<Client> {
     Ok(client)
 }
 
-pub fn write_to_config(key: &str, value: &str, config_path: &PathBuf) -> std::io::Result<()> {
+pub fn write_to_config(key: &str, value: &str, config_path: &PathBuf) -> Result<()> {
     // Create the directory if it doesn't exist
-    let dir_path = config_path.parent().unwrap();
+    let dir_path = config_path
+        .parent()
+        .ok_or(Error::msg("No parent".to_string()))?;
+
     if !dir_path.exists() {
         fs::create_dir_all(dir_path)?;
     }
