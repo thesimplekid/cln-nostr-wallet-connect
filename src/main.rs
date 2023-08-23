@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use cln_plugin::options::{ConfigOption, Value};
 use cln_plugin::Plugin;
 use cln_rpc::model::ListfundsRequest;
@@ -15,7 +15,7 @@ use cln_rpc::ClnRpc;
 use dirs::config_dir;
 use futures::{Stream, StreamExt};
 use lightning_invoice::{Invoice, InvoiceDescription};
-use log::{info, warn};
+use log::{debug, info, warn};
 use nostr_sdk::prelude::{GetBalanceResponseResult, PayInvoiceResponseResult};
 use nostr_sdk::secp256k1::{SecretKey, XOnlyPublicKey};
 use nostr_sdk::{
@@ -398,108 +398,108 @@ async fn handle_pay_invoice(
 ) -> Result<EventBuilder> {
     let bolt11 = params.invoice.parse::<Invoice>()?;
 
-    if let Some(amount) = bolt11.amount_milli_satoshis() {
-        let mut limits = limits.lock().await;
-        let amount = Amount::from_msat(amount);
+    let amount = bolt11
+        .amount_milli_satoshis()
+        .ok_or(anyhow!("Invoice amount undefinded"))?;
 
-        // Check amount is < then config max
-        if amount.msat().gt(&(limits.max_invoice.msat())) {
-            info!("Invoice too large: {amount:?} > {:?}", limits.max_invoice);
-            bail!("Invoice over max");
-        }
+    let mut limits = limits.lock().await;
+    let amount = Amount::from_msat(amount);
 
-        // Check spend does not exceed daily or hourly limit
-        if limits.check_limit(amount).is_err() {
-            info!("Sending {} msat will exceed limit", amount.msat());
-            info!(
-                "Hour limit: {} msats, Hour spent: {} msats",
-                limits.hour_limit.msat(),
-                limits.hour_value.msat()
-            );
-
-            info!(
-                "Day limit: {} msats, Day Spent: {} msats",
-                limits.day_limit.msat(),
-                limits.day_value.msat()
-            );
-            bail!("Limits exceeded");
-        }
-
-        // Currently there is some debate over whether the description hash should be known or not before paying.
-        // The change in CLN requiring the description was reverted but it is still deprecated
-        // With NIP47 as of now the description is unknown
-        // This may need to be reviewed in the future
-        // https://github.com/ElementsProject/lightning/pull/6092
-        // https://github.com/ElementsProject/lightning/releases/tag/v23.02.2
-        let _description = match bolt11.description() {
-            InvoiceDescription::Direct(des) => des.to_string(),
-            InvoiceDescription::Hash(hash) => hash.0.to_string(),
-        };
-
-        info!("CL RPC Request: {:?}, {}", event.id, bolt11);
-        // Send payment
-        let cln_response = cln_client
-            .lock()
-            .await
-            .call(Request::Pay(PayRequest {
-                bolt11: bolt11.to_string(),
-                amount_msat: None,
-                label: None,
-                riskfactor: None,
-                maxfeepercent: None,
-                retry_for: None,
-                maxdelay: None,
-                exemptfee: None,
-                localinvreqid: None,
-                exclude: None,
-                maxfee: None,
-                description: None,
-            }))
-            .await;
-
-        limits.add_spend(amount);
-        info!("CL RPC Response: {:?}", cln_response);
-
-        // Build event response
-        let event_builder = match cln_response {
-            Ok(Response::Pay(res)) => {
-                // Add spend value to daily and hourly limit tracking
-                limits.add_spend(amount);
-
-                create_success_note(
-                    &event.pubkey,
-                    &event.id,
-                    &keys.secret_key()?,
-                    res.payment_preimage,
-                )?
-            }
-            Err(err) => {
-                info!("Payment failed: {}, RPC Error: {}", event.id, err);
-                create_failure_note(
-                    &event.pubkey,
-                    &event.id,
-                    &keys.secret_key()?,
-                    "CL RPC Error",
-                )?
-            }
-            Ok(res) => {
-                info!(
-                    "Payment failed: {}: Unexpected CL response: {:?}",
-                    event.id, res
-                );
-                create_failure_note(
-                    &event.pubkey,
-                    &event.id,
-                    &keys.secret_key()?,
-                    "CL Unexpected Response",
-                )?
-            }
-        };
-
-        return Ok(event_builder);
+    // Check amount is < then config max
+    if amount.msat().gt(&(limits.max_invoice.msat())) {
+        info!("Invoice too large: {amount:?} > {:?}", limits.max_invoice);
+        bail!("Invoice over max");
     }
 
-    bail!("Invoice amount not set");
+    // Check spend does not exceed daily or hourly limit
+    if limits.check_limit(amount).is_err() {
+        info!("Sending {} msat will exceed limit", amount.msat());
+        info!(
+            "Hour limit: {} msats, Hour spent: {} msats",
+            limits.hour_limit.msat(),
+            limits.hour_value.msat()
+        );
+
+        info!(
+            "Day limit: {} msats, Day Spent: {} msats",
+            limits.day_limit.msat(),
+            limits.day_value.msat()
+        );
+        bail!("Limits exceeded");
+    }
+
+    // Currently there is some debate over whether the description hash should be known or not before paying.
+    // The change in CLN requiring the description was reverted but it is still deprecated
+    // With NIP47 as of now the description is unknown
+    // This may need to be reviewed in the future
+    // https://github.com/ElementsProject/lightning/pull/6092
+    // https://github.com/ElementsProject/lightning/releases/tag/v23.02.2
+    let _description = match bolt11.description() {
+        InvoiceDescription::Direct(des) => des.to_string(),
+        InvoiceDescription::Hash(hash) => hash.0.to_string(),
+    };
+
+    debug!("Pay invoice request: {:?}, {}", event.id, bolt11);
+    // Send payment
+    let cln_response = cln_client
+        .lock()
+        .await
+        .call(Request::Pay(PayRequest {
+            bolt11: bolt11.to_string(),
+            amount_msat: None,
+            label: None,
+            riskfactor: None,
+            maxfeepercent: None,
+            retry_for: None,
+            maxdelay: None,
+            exemptfee: None,
+            localinvreqid: None,
+            exclude: None,
+            maxfee: None,
+            description: None,
+        }))
+        .await;
+
+    limits.add_spend(amount);
+    info!("CL RPC Response: {:?}", cln_response);
+
+    // Build event response
+    let event_builder = match cln_response {
+        Ok(Response::Pay(res)) => {
+            // Add spend value to daily and hourly limit tracking
+            limits.add_spend(amount);
+
+            create_success_note(
+                &event.pubkey,
+                &event.id,
+                &keys.secret_key()?,
+                res.payment_preimage,
+            )?
+        }
+        Err(err) => {
+            info!("Payment failed: {}, RPC Error: {}", event.id, err);
+            create_failure_note(
+                &event.pubkey,
+                &event.id,
+                &keys.secret_key()?,
+                "CL RPC Error",
+            )?
+        }
+        Ok(res) => {
+            info!(
+                "Payment failed: {}: Unexpected CL response: {:?}",
+                event.id, res
+            );
+            create_failure_note(
+                &event.pubkey,
+                &event.id,
+                &keys.secret_key()?,
+                "CL Unexpected Response",
+            )?
+        }
+    };
+
+    return Ok(event_builder);
 }
 
 /// Build NIP47 success event
@@ -647,7 +647,6 @@ async fn event_stream(
                             _ => continue,
                         }
                     } else {
-                        info!("Got unexpected message: {}", msg_text);
                         info!("Got unexpected message: {:?}", msg);
                     }
                 }
