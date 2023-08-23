@@ -14,7 +14,7 @@ use cln_rpc::primitives::{Amount, Secret};
 use cln_rpc::ClnRpc;
 use dirs::config_dir;
 use futures::{Stream, StreamExt};
-use lightning_invoice::{Invoice, InvoiceDescription};
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
 use log::{debug, info, warn};
 use nostr_sdk::prelude::{GetBalanceResponseResult, PayInvoiceResponseResult};
 use nostr_sdk::secp256k1::{SecretKey, XOnlyPublicKey};
@@ -386,7 +386,7 @@ async fn handle_get_balance(
         }
     };
 
-    return Ok(event_builder);
+    Ok(event_builder)
 }
 
 async fn handle_pay_invoice(
@@ -396,7 +396,7 @@ async fn handle_pay_invoice(
     cln_client: Arc<Mutex<ClnRpc>>,
     limits: Arc<Mutex<Limits>>,
 ) -> Result<EventBuilder> {
-    let bolt11 = params.invoice.parse::<Invoice>()?;
+    let bolt11 = params.invoice.parse::<Bolt11Invoice>()?;
 
     let amount = bolt11
         .amount_milli_satoshis()
@@ -435,8 +435,8 @@ async fn handle_pay_invoice(
     // https://github.com/ElementsProject/lightning/pull/6092
     // https://github.com/ElementsProject/lightning/releases/tag/v23.02.2
     let _description = match bolt11.description() {
-        InvoiceDescription::Direct(des) => des.to_string(),
-        InvoiceDescription::Hash(hash) => hash.0.to_string(),
+        Bolt11InvoiceDescription::Direct(des) => des.to_string(),
+        Bolt11InvoiceDescription::Hash(hash) => hash.0.to_string(),
     };
 
     debug!("Pay invoice request: {:?}, {}", event.id, bolt11);
@@ -499,7 +499,7 @@ async fn handle_pay_invoice(
         }
     };
 
-    return Ok(event_builder);
+    Ok(event_builder)
 }
 
 /// Build NIP47 success event
@@ -574,7 +574,7 @@ async fn connect_relay(
                     .kind(Kind::WalletConnectRequest)],
             );
 
-            socket.write_message(WsMessage::Text(subscribe_to_requests.as_json()))?;
+            socket.send(WsMessage::Text(subscribe_to_requests.as_json()))?;
 
             return Ok(socket);
         } else {
@@ -603,7 +603,7 @@ async fn event_stream(
         (socket, relay, connect_client_pubkey),
         |(mut socket, relay, connect_client_pubkey)| async move {
             loop {
-                let msg = match socket.clone().lock().await.read_message() {
+                let msg = match socket.clone().lock().await.read() {
                     Ok(msg) => msg,
                     Err(err) => {
                         // Handle disconnection
@@ -630,25 +630,19 @@ async fn event_stream(
                 };
 
                 if msg.is_ping() {
-                    socket
-                        .lock()
-                        .await
-                        .write_message(WsMessage::Pong(vec![]))
-                        .ok();
-                } else {
-                    if let Ok(handled_message) = RelayMessage::from_json(msg_text) {
-                        match &handled_message {
-                            RelayMessage::Event { .. } | RelayMessage::Auth { .. } => {
-                                break Some((
-                                    handled_message,
-                                    (socket, relay.clone(), connect_client_pubkey),
-                                ));
-                            }
-                            _ => continue,
+                    socket.lock().await.send(WsMessage::Pong(vec![])).ok();
+                } else if let Ok(handled_message) = RelayMessage::from_json(msg_text) {
+                    match &handled_message {
+                        RelayMessage::Event { .. } | RelayMessage::Auth { .. } => {
+                            break Some((
+                                handled_message,
+                                (socket, relay.clone(), connect_client_pubkey),
+                            ));
                         }
-                    } else {
-                        info!("Got unexpected message: {:?}", msg);
+                        _ => continue,
                     }
+                } else {
+                    info!("Got unexpected message: {:?}", msg);
                 }
             }
         },
