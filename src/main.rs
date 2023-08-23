@@ -124,12 +124,14 @@ async fn main() -> anyhow::Result<()> {
 
             let keys = utils::handle_keys(wallet_nsec)?;
 
-            utils::write_to_config(
+            if let Err(err) = utils::write_to_config(
                 "WALLET_NSEC",
                 &keys.secret_key()?.display_secret().to_string(),
                 &config_path,
-            )
-            .ok();
+            ) {
+                warn!("Could not write to config: {:?}", err);
+            };
+
             keys
         }
     };
