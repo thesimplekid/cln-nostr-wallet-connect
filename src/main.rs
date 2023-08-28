@@ -212,105 +212,131 @@ async fn main() -> anyhow::Result<()> {
         Amount::from_sat(day_limit as u64),
     )));
 
-    let mut events = event_stream(connect_client_keys.public_key(), relay.clone()).await?;
-    while let Some(msg) = events.next().await {
-        match msg {
-            RelayMessage::Auth { challenge } => {
-                if let Ok(auth_event) = EventBuilder::auth(challenge, relay.clone()).to_event(&keys)
-                {
-                    if let Err(err) = client.send_event(auth_event).await {
-                        warn!("Could not broadcast event: {err}");
+    loop {
+        let mut events = match event_stream(connect_client_keys.public_key(), relay.clone()).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                warn!("Event Stream Error: {:?}", err);
+                continue;
+            }
+        };
+
+        while let Some(msg) = events.next().await {
+            match msg {
+                RelayMessage::Auth { challenge } => {
+                    if let Ok(auth_event) =
+                        EventBuilder::auth(challenge, relay.clone()).to_event(&keys)
+                    {
+                        if let Err(err) = client.send_event(auth_event).await {
+                            warn!("Could not broadcast event: {err}");
+                        }
                     }
                 }
-            }
-            RelayMessage::Event {
-                subscription_id: _,
-                event,
-            } => {
-                // Check event is valid
-                if event.verify().is_err() {
-                    info!("Event {} is invalid", event.id.to_hex());
-                    continue;
-                }
-
-                // info!("Got event: {:?}", serde_json::to_string_pretty(&event));
-
-                // Check event is from correct pubkey
-                if event.pubkey.ne(&connect_client_keys.public_key()) {
-                    // TODO: Should respond with unauth
-                    info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
-                    continue;
-                }
-
-                // Decrypt bolt11 from content (NIP04)
-                let content = match decrypt(
-                    &keys.secret_key()?,
-                    &connect_client_keys.public_key(),
-                    &event.content,
-                ) {
-                    Ok(content) => content,
-                    Err(err) => {
-                        info!("Could not decrypt: {err}");
+                RelayMessage::Event {
+                    subscription_id: _,
+                    event,
+                } => {
+                    // Check event is valid
+                    if event.verify().is_err() {
+                        info!("Event {} is invalid", event.id.to_hex());
                         continue;
                     }
-                };
 
-                // info!("Decrypted Content: {:?}", content);
+                    // info!("Got event: {:?}", serde_json::to_string_pretty(&event));
 
-                let request = nip47::Request::from_json(&content)?;
-                // info!("request: {:?}", request);
+                    // Check event is from correct pubkey
+                    if event.pubkey.ne(&connect_client_keys.public_key()) {
+                        // TODO: Should respond with unauth
+                        info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
+                        continue;
+                    }
 
-                let event_builder = match request.params {
-                    nip47::RequestParams::PayInvoice(pay_invoice_param) => {
-                        //
-                        handle_pay_invoice(
-                            &event,
-                            &keys,
-                            pay_invoice_param,
-                            cln_client.clone(),
-                            limits.clone(),
-                        )
-                        .await
-                    }
-                    nip47::RequestParams::GetBalance => {
-                        handle_get_balance(&event, &keys, cln_client.clone()).await
-                    }
-                    _ => {
-                        todo!()
-                    }
-                };
+                    // Decrypt bolt11 from content (NIP04)
+                    let content = match decrypt(
+                        &keys.secret_key()?,
+                        &connect_client_keys.public_key(),
+                        &event.content,
+                    ) {
+                        Ok(content) => content,
+                        Err(err) => {
+                            info!("Could not decrypt: {err}");
+                            continue;
+                        }
+                    };
 
-                // Build event response
-                let event_builder = match event_builder {
-                    Ok(event_builder) => {
-                        // Add spend value to daily and hourly limit tracking
-                        info!("Payment success: {}", event.id);
-                        event_builder
-                    }
-                    Err(err) => {
-                        info!("Failed: {}, RPC Error: {}", event.id, err);
-                        create_failure_note(
-                            &event.pubkey,
-                            &event.id,
-                            &keys.secret_key()?,
-                            "CL RPC Error",
-                        )?
-                    }
-                };
+                    // info!("Decrypted Content: {:?}", content);
 
-                if let Ok(event) = event_builder.to_event(&keys) {
-                    if let Err(err) = client.send_event(event).await {
-                        warn!("Could not broadcast event: {}", err);
+                    let request = match nip47::Request::from_json(&content) {
+                        Ok(req) => req,
+                        Err(err) => {
+                            warn!("Could not decode request {:?}", err);
+                            continue;
+                        }
+                    };
+                    // info!("request: {:?}", request);
+
+                    let event_builder = match request.params {
+                        nip47::RequestParams::PayInvoice(pay_invoice_param) => {
+                            handle_pay_invoice(
+                                &event,
+                                &keys,
+                                pay_invoice_param,
+                                cln_client.clone(),
+                                limits.clone(),
+                            )
+                            .await
+                        }
+                        nip47::RequestParams::GetBalance => {
+                            handle_get_balance(&event, &keys, cln_client.clone()).await
+                        }
+                        nip47::RequestParams::MakeInvoice(_) => {
+                            bail!("NIP47 Make invoice is not implemented")
+                        }
+                        nip47::RequestParams::LookupInvoice(_) => {
+                            bail!("NIP47 Lookup invoice is not implmented")
+                        }
+                    };
+
+                    // Build event response
+                    let event_builder = match event_builder {
+                        Ok(event_builder) => {
+                            // Add spend value to daily and hourly limit tracking
+                            info!("Payment success: {}", event.id);
+                            event_builder
+                        }
+                        Err(err) => {
+                            warn!("Failed: {}, RPC Error: {}", event.id, err);
+
+                            match create_failure_note(
+                                &event.pubkey,
+                                &event.id,
+                                &keys.secret_key()?,
+                                "CL RPC Error",
+                            ) {
+                                Ok(note) => note,
+                                Err(err) => {
+                                    warn!("Could not create failure note: {:?}", err);
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
+                    if let Ok(event) = event_builder.to_event(&keys) {
+                        if let Err(err) = client.send_event(event).await {
+                            warn!("Could not broadcast event: {}", err);
+                        }
+                    } else {
+                        info!("Could not create event");
                     }
-                } else {
-                    info!("Could not create event");
                 }
+                _ => continue,
             }
-            _ => continue,
         }
+        warn!("Event stream has ended");
     }
 
-    Ok(())
+    //    Ok(())
 }
 
 async fn handle_get_balance(
