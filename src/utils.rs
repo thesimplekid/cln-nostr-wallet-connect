@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 use anyhow::{Error, Result};
 use log::info;
-
 use nostr_sdk::key::FromSkStr;
 use nostr_sdk::{Client, Keys};
 

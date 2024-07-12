@@ -6,26 +6,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
-use cln_plugin::options::{ConfigOption, Value};
+use cln_plugin::options::ConfigOption;
 use cln_plugin::Plugin;
-use cln_rpc::model::ListfundsRequest;
-use cln_rpc::model::{requests::PayRequest, Request, Response};
+use cln_rpc::model::requests::{ListfundsRequest, PayRequest};
+use cln_rpc::model::{Request, Response};
 use cln_rpc::primitives::{Amount, Secret};
 use cln_rpc::ClnRpc;
 use dirs::config_dir;
 use futures::{Stream, StreamExt};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
 use log::{debug, info, warn};
+use nostr_sdk::nips::nip04::{decrypt, encrypt};
+use nostr_sdk::nips::nip47;
 use nostr_sdk::prelude::{GetBalanceResponseResult, PayInvoiceResponseResult};
 use nostr_sdk::secp256k1::{SecretKey, XOnlyPublicKey};
 use nostr_sdk::{
-    nips::{
-        nip04::{decrypt, encrypt},
-        nip47,
-    },
-    ClientMessage, EventBuilder, Filter, Kind, SubscriptionId,
+    ClientMessage, Event, EventBuilder, EventId, Filter, Keys, Kind, RelayMessage, SubscriptionId,
+    Tag, Url,
 };
-use nostr_sdk::{Event, EventId, Keys, RelayMessage, Tag, Url};
 use tokio::io::{stdin, stdout};
 use tokio::sync::Mutex;
 use tungstenite::stream::MaybeTlsStream;
@@ -45,43 +43,39 @@ const CONFIG_PATH: &str = "nostr_connect_config_path";
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     info!("Starting cln-nostr-connect");
+    let config_option =
+        ConfigOption::new_str_no_default(CONFIG_PATH, "Nostr wallet connect config path");
+
+    let day_limit_option =
+        ConfigOption::new_i64_with_default(DAY_LIMIT_SAT, 35000000, "Max msats to spend per day");
+
+    let hour_limt_option =
+        ConfigOption::new_i64_with_default(HOUR_LIMIT_SAT, 10000000, "Max msats to spend per hour");
+
+    let relay_option =
+        ConfigOption::new_str_with_default(RELAY, "ws://localhost:8080", "Default nostr relay");
+
+    let client_secret_option =
+        ConfigOption::new_str_no_default(CLIENT_SECRET, "Nostr pubkey to accept requests from");
+
+    let wallet_nsec_option =
+        ConfigOption::new_str_no_default(WALLET_NSEC, "Nsec to publish success/failure events");
+
+    let max_invoice_option = ConfigOption::new_i64_with_default(
+        MAX_INVOICE_SAT,
+        50000000,
+        "Max size of an invoice (msat)",
+    );
+
     let plugin = if let Some(plugin) = cln_plugin::Builder::new(stdin(), stdout())
-        .option(ConfigOption::new(
-            WALLET_NSEC,
-            Value::OptString,
-            "Nsec to publish success/failure events",
-        ))
-        .option(ConfigOption::new(
-            CLIENT_SECRET,
-            Value::OptString,
-            "Nostr pubkey to accept requests from",
-        ))
+        .option(wallet_nsec_option.clone())
+        .option(client_secret_option.clone())
         // TODO: Would be better to be a list
-        .option(ConfigOption::new(
-            RELAY,
-            Value::String("ws://localhost:8080".to_string()),
-            "Default nostr relay",
-        ))
-        .option(ConfigOption::new(
-            MAX_INVOICE_SAT,
-            Value::Integer(5000),
-            "Max size of an invoice (sat)",
-        ))
-        .option(ConfigOption::new(
-            HOUR_LIMIT_SAT,
-            Value::Integer(10000),
-            "Max sats to spend per hour"
-        ))
-        .option(ConfigOption::new(
-            DAY_LIMIT_SAT,
-            Value::Integer(3500),
-            "Max sats to spend per day"
-        ))
-        .option(ConfigOption::new(
-            CONFIG_PATH,
-            Value::OptString,
-            "Nostr wallet connect config path",
-        ))
+        .option(relay_option.clone())
+        .option(max_invoice_option.clone())
+        .option(hour_limt_option.clone())
+        .option(day_limit_option.clone())
+        .option(config_option.clone())
         .subscribe("shutdown",
             // Handle CLN `shutdown` if it is sent 
             |plugin: Plugin<()>, _: serde_json::Value| async move {
@@ -101,8 +95,8 @@ async fn main() -> anyhow::Result<()> {
     let rpc_socket: PathBuf = plugin.configuration().rpc_file.parse()?;
     let cln_client = Arc::new(Mutex::new(cln_rpc::ClnRpc::new(&rpc_socket).await?));
 
-    let config_path = match plugin.option(CONFIG_PATH) {
-        Some(Value::String(config_path)) => PathBuf::from_str(&config_path)?,
+    let config_path = match plugin.option(&config_option) {
+        Ok(Some(config_path)) => PathBuf::from_str(&config_path)?,
         _ => config_dir()
             .unwrap()
             .join("cln-nostr-wallet-connect")
@@ -112,10 +106,10 @@ async fn main() -> anyhow::Result<()> {
     info!("Nostr Wallet Connect Config: {:?}", config_path);
 
     // Wallet key keys
-    // If key is defined in CLN config that is used if not checks if key in plugin config
-    // if no key found generate a new key and write to config
-    let keys = match plugin.option(WALLET_NSEC) {
-        Some(Value::String(wallet_nsec)) => utils::handle_keys(Some(wallet_nsec))?,
+    // If key is defined in CLN config that is used if not checks if key in plugin
+    // config if no key found generate a new key and write to config
+    let keys = match plugin.option(&wallet_nsec_option) {
+        Ok(Some(wallet_nsec)) => utils::handle_keys(Some(wallet_nsec))?,
         _ => {
             let wallet_nsec = match utils::read_from_config("WALLET_NSEC", &config_path) {
                 Ok(nsec) => nsec,
@@ -136,8 +130,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let connect_client_keys = match plugin.option(CLIENT_SECRET) {
-        Some(Value::String(client_secret)) => utils::handle_keys(Some(client_secret))?,
+    let connect_client_keys = match plugin.option(&client_secret_option) {
+        Ok(Some(client_secret)) => utils::handle_keys(Some(client_secret))?,
         _ => {
             let client_secret = match utils::read_from_config("CLIENT_SECRET", &config_path) {
                 Ok(secret) => secret,
@@ -157,32 +151,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let nostr_relay = plugin
-        .option(RELAY)
+        .option(&relay_option)
         .expect("Option is defined")
         .as_str()
-        .expect("Option is a string")
         .to_owned();
 
     let max_invoice_amount = plugin
-        .option(MAX_INVOICE_SAT)
-        .expect("Option is defined")
-        .as_i64()
-        .expect("Option is a i64")
-        .to_owned();
+        .option(&max_invoice_option)
+        .expect("Option is defined");
 
-    let hour_limit = plugin
-        .option(HOUR_LIMIT_SAT)
-        .expect("Option is defined")
-        .as_i64()
-        .expect("Option is a i64")
-        .to_owned();
+    let hour_limit = plugin.option(&hour_limt_option).expect("Option is defined");
 
-    let day_limit = plugin
-        .option(DAY_LIMIT_SAT)
-        .expect("Option is defined")
-        .as_i64()
-        .expect("Option is a i64")
-        .to_owned();
+    let day_limit = plugin.option(&day_limit_option).expect("Option is defined");
 
     // Relay to listen for events and publish events to
     let relay = Url::from_str(&nostr_relay)?;
@@ -292,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
                             bail!("NIP47 Make invoice is not implemented")
                         }
                         nip47::RequestParams::LookupInvoice(_) => {
-                            bail!("NIP47 Lookup invoice is not implmented")
+                            bail!("NIP47 Lookup invoice is not implemented")
                         }
                     };
 
@@ -453,10 +433,10 @@ async fn handle_pay_invoice(
         bail!("Limits exceeded");
     }
 
-    // Currently there is some debate over whether the description hash should be known or not before paying.
-    // The change in CLN requiring the description was reverted but it is still deprecated
-    // With NIP47 as of now the description is unknown
-    // This may need to be reviewed in the future
+    // Currently there is some debate over whether the description hash should be
+    // known or not before paying. The change in CLN requiring the description
+    // was reverted but it is still deprecated With NIP47 as of now the
+    // description is unknown This may need to be reviewed in the future
     // https://github.com/ElementsProject/lightning/pull/6092
     // https://github.com/ElementsProject/lightning/releases/tag/v23.02.2
     let _description = match bolt11.description() {
@@ -482,6 +462,7 @@ async fn handle_pay_invoice(
             exclude: None,
             maxfee: None,
             description: None,
+            partial_msat: None,
         }))
         .await;
 

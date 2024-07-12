@@ -1,5 +1,10 @@
 # Changelog
 
+[Unreleased]
+
+## Change
+- Update cln-rpc
+- Update cln-plugin
 
 ## [0.2.3]
 ### Fixed
