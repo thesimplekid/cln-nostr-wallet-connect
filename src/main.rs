@@ -563,7 +563,7 @@ async fn connect_relay(
     let mut delay = Duration::from_secs(10);
 
     for attempt in 0..max_retries {
-        if let Ok((mut socket, _response)) = connect(url.clone()) {
+        if let Ok((mut socket, _response)) = connect(url.to_string()) {
             // Subscription filter
             let subscribe_to_requests = ClientMessage::req(
                 SubscriptionId::generate(),

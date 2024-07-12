@@ -18,9 +18,9 @@ cln-rpc = "0.1.9"
 futures = "0.3.26"
 serde = "1"
 serde_json = "1"
-tokio = { version = "1.38", features = [ "full" ] }
+tokio = { version = "1", features = [ "full" ] }
 nostr-sdk = { version = "0.32", default_features = false, features = [ "nip47" ] }
-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"]}
-dirs = "5.0.0"
+tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"]}
+dirs = "5.0.1"
 hex = "0.4.3"
-lightning-invoice = "0.24.0"
+lightning-invoice = "0.31.0"
