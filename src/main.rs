@@ -1,33 +1,32 @@
 use std::net::TcpStream;
-use std::ops::Add;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
+use cln_nwc::ClnNwc;
 use cln_plugin::options::ConfigOption;
 use cln_plugin::Plugin;
-use cln_rpc::model::requests::{ListfundsRequest, PayRequest};
-use cln_rpc::model::{Request, Response};
-use cln_rpc::primitives::{Amount, Secret};
-use cln_rpc::ClnRpc;
+use cln_rpc::primitives::Amount;
 use dirs::config_dir;
 use futures::{Stream, StreamExt};
-use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
-use log::{debug, info, warn};
+use limits::Limits;
+use log::{info, warn};
 use nostr_sdk::nips::nip04::{decrypt, encrypt};
 use nostr_sdk::nips::nip47;
 use nostr_sdk::prelude::{GetBalanceResponseResult, PayInvoiceResponseResult};
 use nostr_sdk::{
-    ClientMessage, Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, PublicKey,
-    RelayMessage, SecretKey, SubscriptionId, Tag, Url,
+    ClientMessage, EventBuilder, EventId, Filter, JsonUtil, Kind, PublicKey, RelayMessage,
+    SecretKey, SubscriptionId, Tag, Url,
 };
 use tokio::io::{stdin, stdout};
 use tokio::sync::Mutex;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message as WsMessage, WebSocket};
 
+mod cln_nwc;
+mod limits;
 mod utils;
 
 // Config Names
@@ -92,7 +91,6 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let rpc_socket: PathBuf = plugin.configuration().rpc_file.parse()?;
-    let cln_client = Arc::new(Mutex::new(cln_rpc::ClnRpc::new(&rpc_socket).await?));
 
     let config_path = match plugin.option(&config_option) {
         Ok(Some(config_path)) => PathBuf::from_str(&config_path)?,
@@ -175,7 +173,14 @@ async fn main() -> anyhow::Result<()> {
         None,
     );
 
-    info!("{}", wallet_connect_uri.to_string());
+    log::info!("{}", wallet_connect_uri.to_string());
+    let limits = Limits::new(
+        Amount::from_sat(max_invoice_amount as u64),
+        Amount::from_sat(hour_limit as u64),
+        Amount::from_sat(day_limit as u64),
+    );
+
+    let cln_nwc = ClnNwc::new(limits, rpc_socket).await?;
 
     // Publish Wallet Connect info
     let info_event =
@@ -183,12 +188,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Publish info Event
     client.send_event(info_event).await?;
-
-    let limits = Arc::new(Mutex::new(Limits::new(
-        Amount::from_sat(max_invoice_amount as u64),
-        Amount::from_sat(hour_limit as u64),
-        Amount::from_sat(day_limit as u64),
-    )));
 
     loop {
         let mut events = match event_stream(connect_client_keys.public_key(), relay.clone()).await {
@@ -255,26 +254,75 @@ async fn main() -> anyhow::Result<()> {
 
                     let event_builder = match request.params {
                         nip47::RequestParams::PayInvoice(pay_invoice_param) => {
-                            handle_pay_invoice(
-                                &event,
-                                &keys,
-                                pay_invoice_param,
-                                cln_client.clone(),
-                                limits.clone(),
-                            )
-                            .await
+                            match cln_nwc.pay_invoice(pay_invoice_param.invoice).await {
+                                Ok(preimage) => create_success_note(
+                                    &event.pubkey,
+                                    &event.id,
+                                    keys.secret_key()?,
+                                    preimage,
+                                ),
+                                Err(err) => create_failure_note(
+                                    &event.pubkey,
+                                    &event.id,
+                                    keys.secret_key()?,
+                                    &err.to_string(),
+                                ),
+                            }
                         }
-                        nip47::RequestParams::GetBalance => {
-                            handle_get_balance(&event, &keys, cln_client.clone()).await
-                        }
+                        nip47::RequestParams::GetBalance => match cln_nwc.get_balance().await {
+                            Ok(amount) => {
+                                let response = nip47::Response {
+                                    result_type: nip47::Method::GetBalance,
+                                    error: None,
+                                    result: Some(nip47::ResponseResult::GetBalance(
+                                        GetBalanceResponseResult {
+                                            balance: amount.msat(),
+                                        },
+                                    )),
+                                };
+
+                                let encrypted_response = encrypt(
+                                    &keys.secret_key()?.clone(),
+                                    &event.pubkey,
+                                    response.as_json(),
+                                )?;
+
+                                Ok(EventBuilder::new(
+                                    Kind::WalletConnectResponse,
+                                    encrypted_response,
+                                    vec![
+                                        Tag::public_key(event.pubkey.to_owned()),
+                                        Tag::event(event.id.to_owned()),
+                                    ],
+                                ))
+                            }
+                            Err(_) => create_failure_note(
+                                &event.pubkey,
+                                &event.id,
+                                keys.secret_key()?,
+                                "CL RPC Error",
+                            ),
+                        },
                         nip47::RequestParams::MakeInvoice(_) => {
                             bail!("NIP47 Make invoice is not implemented")
                         }
                         nip47::RequestParams::LookupInvoice(_) => {
                             bail!("NIP47 Lookup invoice is not implemented")
                         }
-                        _ => {
-                            todo!()
+                        nip47::RequestParams::MultiPayInvoice(_) => {
+                            bail!("NIP47 Multi pay is not implemented")
+                        }
+                        nip47::RequestParams::PayKeysend(_) => {
+                            bail!("NIP47 Pay keysend is not implemented")
+                        }
+                        nip47::RequestParams::MultiPayKeysend(_) => {
+                            bail!("NIP47 Multi Pay Keysend is not implemented")
+                        }
+                        nip47::RequestParams::ListTransactions(_) => {
+                            bail!("NIP47 List transactions is not implmneted")
+                        }
+                        nip47::RequestParams::GetInfo => {
+                            bail!("NIP47 Get info is not implemented")
                         }
                     };
 
@@ -292,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
                                 &event.pubkey,
                                 &event.id,
                                 &keys.secret_key()?.clone(),
-                                "CL RPC Error",
+                                "CLN RPC Error",
                             ) {
                                 Ok(note) => note,
                                 Err(err) => {
@@ -320,200 +368,18 @@ async fn main() -> anyhow::Result<()> {
     //    Ok(())
 }
 
-async fn handle_get_balance(
-    event: &Event,
-    keys: &Keys,
-    cln_client: Arc<Mutex<ClnRpc>>,
-) -> Result<EventBuilder> {
-    let cln_response = cln_client
-        .lock()
-        .await
-        .call(Request::ListFunds(ListfundsRequest { spent: None }))
-        .await;
-
-    let event_builder = match cln_response {
-        Ok(Response::ListFunds(funds)) => {
-            let balance: u64 = funds
-                .channels
-                .iter()
-                .map(|c| c.our_amount_msat.msat())
-                .sum();
-
-            let balance = Amount::from_msat(balance);
-
-            info!("Balance Requested: {:?}", balance);
-
-            // Add spend value to daily and hourly limit tracking
-
-            let response = nip47::Response {
-                result_type: nip47::Method::GetBalance,
-                error: None,
-                result: Some(nip47::ResponseResult::GetBalance(
-                    GetBalanceResponseResult {
-                        balance: balance.msat(),
-                    },
-                )),
-            };
-
-            let encrypted_response = encrypt(
-                &keys.secret_key()?.clone(),
-                &event.pubkey,
-                response.as_json(),
-            )?;
-
-            EventBuilder::new(
-                Kind::WalletConnectResponse,
-                encrypted_response,
-                vec![
-                    Tag::public_key(event.pubkey.to_owned()),
-                    Tag::event(event.id.to_owned()),
-                ],
-            )
-        }
-        Err(err) => {
-            info!("Payment failed: {}, RPC Error: {}", event.id, err);
-            create_failure_note(&event.pubkey, &event.id, keys.secret_key()?, "CL RPC Error")?
-        }
-        Ok(res) => {
-            info!(
-                "Payment failed: {}: Unexpected CL response: {:?}",
-                event.id, res
-            );
-            create_failure_note(
-                &event.pubkey,
-                &event.id,
-                keys.secret_key()?,
-                "CL Unexpected Response",
-            )?
-        }
-    };
-
-    Ok(event_builder)
-}
-
-async fn handle_pay_invoice(
-    event: &Event,
-    keys: &Keys,
-    params: nip47::PayInvoiceRequestParams,
-    cln_client: Arc<Mutex<ClnRpc>>,
-    limits: Arc<Mutex<Limits>>,
-) -> Result<EventBuilder> {
-    let bolt11 = params.invoice.parse::<Bolt11Invoice>()?;
-
-    let amount = bolt11
-        .amount_milli_satoshis()
-        .ok_or(anyhow!("Invoice amount undefinded"))?;
-
-    let mut limits = limits.lock().await;
-    let amount = Amount::from_msat(amount);
-
-    // Check amount is < then config max
-    if amount.msat().gt(&(limits.max_invoice.msat())) {
-        info!("Invoice too large: {amount:?} > {:?}", limits.max_invoice);
-        bail!("Invoice over max");
-    }
-
-    // Check spend does not exceed daily or hourly limit
-    if limits.check_limit(amount).is_err() {
-        info!("Sending {} msat will exceed limit", amount.msat());
-        info!(
-            "Hour limit: {} msats, Hour spent: {} msats",
-            limits.hour_limit.msat(),
-            limits.hour_value.msat()
-        );
-
-        info!(
-            "Day limit: {} msats, Day Spent: {} msats",
-            limits.day_limit.msat(),
-            limits.day_value.msat()
-        );
-        bail!("Limits exceeded");
-    }
-
-    // Currently there is some debate over whether the description hash should be
-    // known or not before paying. The change in CLN requiring the description
-    // was reverted but it is still deprecated With NIP47 as of now the
-    // description is unknown This may need to be reviewed in the future
-    // https://github.com/ElementsProject/lightning/pull/6092
-    // https://github.com/ElementsProject/lightning/releases/tag/v23.02.2
-    let _description = match bolt11.description() {
-        Bolt11InvoiceDescription::Direct(des) => des.to_string(),
-        Bolt11InvoiceDescription::Hash(hash) => hash.0.to_string(),
-    };
-
-    debug!("Pay invoice request: {:?}, {}", event.id, bolt11);
-    // Send payment
-    let cln_response = cln_client
-        .lock()
-        .await
-        .call(Request::Pay(PayRequest {
-            bolt11: bolt11.to_string(),
-            amount_msat: None,
-            label: None,
-            riskfactor: None,
-            maxfeepercent: None,
-            retry_for: None,
-            maxdelay: None,
-            exemptfee: None,
-            localinvreqid: None,
-            exclude: None,
-            maxfee: None,
-            description: None,
-            partial_msat: None,
-        }))
-        .await;
-
-    limits.add_spend(amount);
-    info!("CL RPC Response: {:?}", cln_response);
-
-    // Build event response
-    let event_builder = match cln_response {
-        Ok(Response::Pay(res)) => {
-            // Add spend value to daily and hourly limit tracking
-            limits.add_spend(amount);
-
-            create_success_note(
-                &event.pubkey,
-                &event.id,
-                keys.secret_key()?,
-                res.payment_preimage,
-            )?
-        }
-        Err(err) => {
-            info!("Payment failed: {}, RPC Error: {}", event.id, err);
-            create_failure_note(&event.pubkey, &event.id, keys.secret_key()?, "CL RPC Error")?
-        }
-        Ok(res) => {
-            info!(
-                "Payment failed: {}: Unexpected CL response: {:?}",
-                event.id, res
-            );
-            create_failure_note(
-                &event.pubkey,
-                &event.id,
-                keys.secret_key()?,
-                "CL Unexpected Response",
-            )?
-        }
-    };
-
-    Ok(event_builder)
-}
-
 /// Build NIP47 success event
 fn create_success_note(
     connect_client_pubkey: &PublicKey,
     request_id: &EventId,
     connect_sk: &SecretKey,
-    preimage: Secret,
+    preimage: String,
 ) -> Result<EventBuilder> {
     let response = nip47::Response {
         result_type: nip47::Method::PayInvoice,
         error: None,
         result: Some(nip47::ResponseResult::PayInvoice(
-            PayInvoiceResponseResult {
-                preimage: hex::encode(preimage.to_vec()),
-            },
+            PayInvoiceResponseResult { preimage },
         )),
     };
 
@@ -646,79 +512,4 @@ async fn event_stream(
         },
     )
     .boxed())
-}
-
-struct Limits {
-    /// Max invoice size
-    max_invoice: Amount,
-    /// Instant of our start
-    hour_start: Instant,
-    /// Value sent in hour
-    hour_value: Amount,
-    /// Hour limit
-    hour_limit: Amount,
-    /// Instant of day start
-    day_start: Instant,
-    /// Value sent in day
-    day_value: Amount,
-    /// Day limit
-    day_limit: Amount,
-}
-
-const SECONDS_IN_HOUR: Duration = Duration::new(3600, 0);
-const SECONDS_IN_DAY: Duration = Duration::new(86400, 0);
-
-impl Limits {
-    fn new(max_invoice: Amount, hour_limit: Amount, day_limit: Amount) -> Self {
-        Self {
-            max_invoice,
-            hour_start: Instant::now(),
-            hour_value: Amount::from_msat(0),
-            hour_limit,
-            day_start: Instant::now(),
-            day_value: Amount::from_msat(0),
-            day_limit,
-        }
-    }
-
-    fn check_limit(&mut self, amount: Amount) -> Result<()> {
-        if self.hour_start.elapsed() > SECONDS_IN_HOUR {
-            self.reset_hour();
-        }
-
-        if self.day_start.elapsed() > SECONDS_IN_DAY {
-            self.reset_day();
-        }
-
-        if (self.day_value + amount).msat().gt(&self.day_limit.msat()) {
-            bail!("Daily spend limit exceeded")
-        }
-
-        if (self.hour_value + amount)
-            .msat()
-            .gt(&self.hour_limit.msat())
-        {
-            bail!("Hour spend limit exceeded")
-        }
-
-        Ok(())
-    }
-
-    fn reset_hour(&mut self) {
-        self.hour_value = Amount::from_msat(0);
-        self.hour_start = Instant::now();
-    }
-
-    fn reset_day(&mut self) {
-        self.day_value = Amount::from_msat(0);
-        self.day_start = Instant::now();
-    }
-
-    fn add_spend(&mut self, amount: Amount) {
-        // Add amount to hour spend
-        self.hour_value = self.hour_value.add(amount);
-
-        // Add amount to day spend
-        self.day_value = self.day_value.add(amount);
-    }
 }

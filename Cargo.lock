@@ -372,6 +372,7 @@ dependencies = [
  "nostr-sdk",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tungstenite",
 ]

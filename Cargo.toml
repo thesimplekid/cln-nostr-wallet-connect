@@ -12,6 +12,7 @@ description = "Core Lightning plugin for paying invoices with nostr connect (NIP
 
 [dependencies]
 anyhow = "1"
+thiserror = "1"
 log = "0.4"
 cln-plugin = "0.1.9"
 cln-rpc = "0.1.9"
