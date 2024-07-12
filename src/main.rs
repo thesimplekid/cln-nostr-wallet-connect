@@ -37,9 +37,9 @@ mod utils;
 const WALLET_NSEC: &str = "nostr_connect_wallet_nsec";
 const CLIENT_SECRET: &str = "nostr_connect_client_secret";
 const RELAY: &str = "nostr_connect_relay";
-const MAX_INVOICE: &str = "nostr_connect_max_invoice";
-const HOUR_LIMIT: &str = "nostr_connect_hour_limit";
-const DAY_LIMIT: &str = "nostr_connect_day_limit";
+const MAX_INVOICE_SAT: &str = "nostr_connect_max_invoice_sat";
+const HOUR_LIMIT_SAT: &str = "nostr_connect_hour_limit_sat";
+const DAY_LIMIT_SAT: &str = "nostr_connect_day_limit_sat";
 const CONFIG_PATH: &str = "nostr_connect_config_path";
 
 #[tokio::main]
@@ -63,19 +63,19 @@ async fn main() -> anyhow::Result<()> {
             "Default nostr relay",
         ))
         .option(ConfigOption::new(
-            MAX_INVOICE,
-            Value::Integer(50000000),
-            "Max size of an invoice (msat)",
+            MAX_INVOICE_SAT,
+            Value::Integer(5000),
+            "Max size of an invoice (sat)",
         ))
         .option(ConfigOption::new(
-            HOUR_LIMIT,
-            Value::Integer(10000000),
-            "Max msats to spend per hour"
+            HOUR_LIMIT_SAT,
+            Value::Integer(10000),
+            "Max sats to spend per hour"
         ))
         .option(ConfigOption::new(
-            DAY_LIMIT,
-            Value::Integer(35000000),
-            "Max msats to spend per day"
+            DAY_LIMIT_SAT,
+            Value::Integer(3500),
+            "Max sats to spend per day"
         ))
         .option(ConfigOption::new(
             CONFIG_PATH,
@@ -164,21 +164,21 @@ async fn main() -> anyhow::Result<()> {
         .to_owned();
 
     let max_invoice_amount = plugin
-        .option(MAX_INVOICE)
+        .option(MAX_INVOICE_SAT)
         .expect("Option is defined")
         .as_i64()
         .expect("Option is a i64")
         .to_owned();
 
     let hour_limit = plugin
-        .option(HOUR_LIMIT)
+        .option(HOUR_LIMIT_SAT)
         .expect("Option is defined")
         .as_i64()
         .expect("Option is a i64")
         .to_owned();
 
     let day_limit = plugin
-        .option(DAY_LIMIT)
+        .option(DAY_LIMIT_SAT)
         .expect("Option is defined")
         .as_i64()
         .expect("Option is a i64")
@@ -205,10 +205,9 @@ async fn main() -> anyhow::Result<()> {
     // Publish info Event
     client.send_event(info_event).await?;
 
-    // REVIEW: why is one msat?
     let limits = Arc::new(Mutex::new(Limits::new(
         Amount::from_sat(max_invoice_amount as u64),
-        Amount::from_msat(hour_limit as u64),
+        Amount::from_sat(hour_limit as u64),
         Amount::from_sat(day_limit as u64),
     )));
 
