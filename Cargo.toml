@@ -19,7 +19,7 @@ futures = "0.3.26"
 serde = "1"
 serde_json = "1"
 tokio = { version = "1.38", features = [ "full" ] }
-nostr-sdk = { version = "0.23.0", default_features = false, features = ["nip19", "nip47"] }
+nostr-sdk = { version = "0.32", default_features = false, features = [ "nip47" ] }
 tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"]}
 dirs = "5.0.0"
 hex = "0.4.3"

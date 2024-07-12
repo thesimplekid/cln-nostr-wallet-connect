@@ -19,10 +19,9 @@ use log::{debug, info, warn};
 use nostr_sdk::nips::nip04::{decrypt, encrypt};
 use nostr_sdk::nips::nip47;
 use nostr_sdk::prelude::{GetBalanceResponseResult, PayInvoiceResponseResult};
-use nostr_sdk::secp256k1::{SecretKey, XOnlyPublicKey};
 use nostr_sdk::{
-    ClientMessage, Event, EventBuilder, EventId, Filter, Keys, Kind, RelayMessage, SubscriptionId,
-    Tag, Url,
+    ClientMessage, Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, PublicKey,
+    RelayMessage, SecretKey, SubscriptionId, Tag, Url,
 };
 use tokio::io::{stdin, stdout};
 use tokio::sync::Mutex;
@@ -172,15 +171,15 @@ async fn main() -> anyhow::Result<()> {
     let wallet_connect_uri: nip47::NostrWalletConnectURI = nip47::NostrWalletConnectURI::new(
         keys.public_key(),
         relay.clone(),
-        Some(connect_client_keys.secret_key()?),
+        connect_client_keys.secret_key()?.clone(),
         None,
-    )?;
+    );
 
     info!("{}", wallet_connect_uri.to_string());
 
     // Publish Wallet Connect info
     let info_event =
-        EventBuilder::new(Kind::WalletConnectInfo, "pay_invoice", &[]).to_event(&keys)?;
+        EventBuilder::new(Kind::WalletConnectInfo, "pay_invoice", vec![]).to_event(&keys)?;
 
     // Publish info Event
     client.send_event(info_event).await?;
@@ -232,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // Decrypt bolt11 from content (NIP04)
                     let content = match decrypt(
-                        &keys.secret_key()?,
+                        &keys.secret_key()?.clone(),
                         &connect_client_keys.public_key(),
                         &event.content,
                     ) {
@@ -274,6 +273,9 @@ async fn main() -> anyhow::Result<()> {
                         nip47::RequestParams::LookupInvoice(_) => {
                             bail!("NIP47 Lookup invoice is not implemented")
                         }
+                        _ => {
+                            todo!()
+                        }
                     };
 
                     // Build event response
@@ -289,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
                             match create_failure_note(
                                 &event.pubkey,
                                 &event.id,
-                                &keys.secret_key()?,
+                                &keys.secret_key()?.clone(),
                                 "CL RPC Error",
                             ) {
                                 Ok(note) => note,
@@ -349,33 +351,28 @@ async fn handle_get_balance(
                 result: Some(nip47::ResponseResult::GetBalance(
                     GetBalanceResponseResult {
                         balance: balance.msat(),
-                        // TODO: Return limits
-                        max_amount: None,
-                        budget_renewal: None,
                     },
                 )),
             };
 
-            let encrypted_response =
-                encrypt(&keys.secret_key()?, &event.pubkey, response.as_json())?;
+            let encrypted_response = encrypt(
+                &keys.secret_key()?.clone(),
+                &event.pubkey,
+                response.as_json(),
+            )?;
 
             EventBuilder::new(
                 Kind::WalletConnectResponse,
                 encrypted_response,
-                &[
-                    Tag::PubKey(event.pubkey.to_owned(), None),
-                    Tag::Event(event.id.to_owned(), None, None),
+                vec![
+                    Tag::public_key(event.pubkey.to_owned()),
+                    Tag::event(event.id.to_owned()),
                 ],
             )
         }
         Err(err) => {
             info!("Payment failed: {}, RPC Error: {}", event.id, err);
-            create_failure_note(
-                &event.pubkey,
-                &event.id,
-                &keys.secret_key()?,
-                "CL RPC Error",
-            )?
+            create_failure_note(&event.pubkey, &event.id, keys.secret_key()?, "CL RPC Error")?
         }
         Ok(res) => {
             info!(
@@ -385,7 +382,7 @@ async fn handle_get_balance(
             create_failure_note(
                 &event.pubkey,
                 &event.id,
-                &keys.secret_key()?,
+                keys.secret_key()?,
                 "CL Unexpected Response",
             )?
         }
@@ -478,18 +475,13 @@ async fn handle_pay_invoice(
             create_success_note(
                 &event.pubkey,
                 &event.id,
-                &keys.secret_key()?,
+                keys.secret_key()?,
                 res.payment_preimage,
             )?
         }
         Err(err) => {
             info!("Payment failed: {}, RPC Error: {}", event.id, err);
-            create_failure_note(
-                &event.pubkey,
-                &event.id,
-                &keys.secret_key()?,
-                "CL RPC Error",
-            )?
+            create_failure_note(&event.pubkey, &event.id, keys.secret_key()?, "CL RPC Error")?
         }
         Ok(res) => {
             info!(
@@ -499,7 +491,7 @@ async fn handle_pay_invoice(
             create_failure_note(
                 &event.pubkey,
                 &event.id,
-                &keys.secret_key()?,
+                keys.secret_key()?,
                 "CL Unexpected Response",
             )?
         }
@@ -510,7 +502,7 @@ async fn handle_pay_invoice(
 
 /// Build NIP47 success event
 fn create_success_note(
-    connect_client_pubkey: &XOnlyPublicKey,
+    connect_client_pubkey: &PublicKey,
     request_id: &EventId,
     connect_sk: &SecretKey,
     preimage: Secret,
@@ -529,16 +521,16 @@ fn create_success_note(
     Ok(EventBuilder::new(
         Kind::WalletConnectResponse,
         encrypted_response?,
-        &[
-            Tag::PubKey(connect_client_pubkey.to_owned(), None),
-            Tag::Event(request_id.to_owned(), None, None),
+        [
+            Tag::public_key(connect_client_pubkey.to_owned()),
+            Tag::event(request_id.to_owned()),
         ],
     ))
 }
 
 /// Build NIP47 failure event
 fn create_failure_note(
-    connect_client_pubkey: &XOnlyPublicKey,
+    connect_client_pubkey: &PublicKey,
     request_id: &EventId,
     connect_sk: &SecretKey,
     reason: &str,
@@ -556,16 +548,16 @@ fn create_failure_note(
     Ok(EventBuilder::new(
         Kind::WalletConnectResponse,
         encrypted_response,
-        &[
-            Tag::PubKey(connect_client_pubkey.to_owned(), None),
-            Tag::Event(request_id.to_owned(), None, None),
+        [
+            Tag::public_key(connect_client_pubkey.to_owned()),
+            Tag::event(request_id.to_owned()),
         ],
     ))
 }
 
 async fn connect_relay(
     url: Url,
-    connect_client_pubkey: &XOnlyPublicKey,
+    connect_client_pubkey: PublicKey,
 ) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
     let max_retries = 500;
     let mut delay = Duration::from_secs(10);
@@ -573,10 +565,10 @@ async fn connect_relay(
     for attempt in 0..max_retries {
         if let Ok((mut socket, _response)) = connect(url.clone()) {
             // Subscription filter
-            let subscribe_to_requests = ClientMessage::new_req(
+            let subscribe_to_requests = ClientMessage::req(
                 SubscriptionId::generate(),
                 vec![Filter::new()
-                    .author(connect_client_pubkey.to_string())
+                    .author(connect_client_pubkey)
                     .kind(Kind::WalletConnectRequest)],
             );
 
@@ -598,10 +590,10 @@ async fn connect_relay(
 }
 
 async fn event_stream(
-    connect_client_pubkey: XOnlyPublicKey,
+    connect_client_pubkey: PublicKey,
     relay: Url,
 ) -> Result<impl Stream<Item = RelayMessage>> {
-    let socket = connect_relay(relay.clone(), &connect_client_pubkey).await?;
+    let socket = connect_relay(relay.clone(), connect_client_pubkey).await?;
 
     let socket = Arc::new(Mutex::new(socket));
 
@@ -615,7 +607,7 @@ async fn event_stream(
                         // Handle disconnection
                         info!("WebSocket disconnected: {}", err);
                         info!("Attempting to reconnect ...");
-                        match connect_relay(relay.clone(), &connect_client_pubkey).await {
+                        match connect_relay(relay.clone(), connect_client_pubkey).await {
                             Ok(new_socket) => socket = Arc::new(Mutex::new(new_socket)),
                             Err(err) => {
                                 info!("{}", err);

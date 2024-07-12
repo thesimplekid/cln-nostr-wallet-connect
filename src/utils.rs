@@ -5,10 +5,10 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{Error, Result};
 use log::info;
-use nostr_sdk::key::FromSkStr;
 use nostr_sdk::{Client, Keys};
 
 pub fn handle_keys(private_key: Option<String>) -> Result<Keys> {
@@ -16,7 +16,7 @@ pub fn handle_keys(private_key: Option<String>) -> Result<Keys> {
     let keys = match private_key {
         Some(pk) => {
             // create a new identity using the provided private key
-            Keys::from_sk_str(pk.as_str())?
+            Keys::from_str(pk.as_str())?
         }
         None => {
             // create a new identity with a new keypair
@@ -31,7 +31,6 @@ pub fn handle_keys(private_key: Option<String>) -> Result<Keys> {
 // Creates the websocket client that is used for communicating with relays
 pub async fn create_client(keys: &Keys, relays: Vec<String>) -> Result<Client> {
     let client = Client::new(keys);
-    let relays = relays.iter().map(|url| (url.clone(), None)).collect();
     client.add_relays(relays).await?;
     client.connect().await;
     Ok(client)
