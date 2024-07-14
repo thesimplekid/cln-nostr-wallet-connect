@@ -210,7 +210,7 @@ impl ClnNwc {
             .cln_rpc
             .lock()
             .await
-            .call(Request::Pay(PayRequest {
+            .call(cln_rpc::Request::Pay(PayRequest {
                 bolt11: bolt11.to_string(),
                 amount_msat: None,
                 label: None,
@@ -290,7 +290,9 @@ impl ClnNwc {
             .cln_rpc
             .lock()
             .await
-            .call(Request::ListFunds(ListfundsRequest { spent: None }))
+            .call(cln_rpc::Request::ListFunds(ListfundsRequest {
+                spent: None,
+            }))
             .await;
 
         let event_builder = match cln_response {
