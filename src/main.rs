@@ -14,7 +14,6 @@ use dirs::config_dir;
 use futures::{Stream, StreamExt};
 use limits::Limits;
 use log::{info, warn};
-use nostr_sdk::nips::nip04::decrypt;
 use nostr_sdk::nips::nip47;
 use nostr_sdk::{
     ClientMessage, Filter, JsonUtil, Keys, Kind, PublicKey, RelayMessage, SubscriptionId, Url,
@@ -173,44 +172,16 @@ async fn main() -> anyhow::Result<()> {
                     subscription_id: _,
                     event,
                 } => {
-                    // Check event is valid
-                    if event.verify().is_err() {
-                        info!("Event {} is invalid", event.id.to_hex());
-                        continue;
-                    }
-
-                    // info!("Got event: {:?}", serde_json::to_string_pretty(&event));
-
-                    // Check event is from correct pubkey
-                    if event.pubkey.ne(&client_keys.public_key()) {
-                        // TODO: Should respond with unauth
-                        info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
-                        continue;
-                    }
-
-                    // Decrypt bolt11 from content (NIP04)
-                    let content = match decrypt(
-                        &nwc_keys.secret_key()?.clone(),
-                        &client_keys.public_key(),
-                        &event.content,
-                    ) {
-                        Ok(content) => content,
-                        Err(err) => {
-                            info!("Could not decrypt: {err}");
+                    let request = match cln_nwc.verify_event(&event).await {
+                        Ok(request) => {
+                            log::info!("Received a valid nostr event: {}", event.id);
+                            request
+                        }
+                        Err(_) => {
+                            log::info!("Received an invalid nostr event: {}", event.id);
                             continue;
                         }
                     };
-
-                    // info!("Decrypted Content: {:?}", content);
-
-                    let request = match nip47::Request::from_json(&content) {
-                        Ok(req) => req,
-                        Err(err) => {
-                            warn!("Could not decode request {:?}", err);
-                            continue;
-                        }
-                    };
-                    // info!("request: {:?}", request);
 
                     match request.params {
                         nip47::RequestParams::PayInvoice(pay_invoice_param) => {

@@ -8,11 +8,11 @@ use cln_rpc::model::requests::{ListfundsRequest, PayRequest};
 use cln_rpc::model::responses::PayStatus;
 use cln_rpc::model::Response;
 use cln_rpc::primitives::Amount;
-use cln_rpc::Request;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
-use nostr_sdk::nips::nip04::encrypt;
+use nip47::Request;
+use nostr_sdk::nips::nip04::{decrypt, encrypt};
 use nostr_sdk::nips::nip47::{
-    self, GetBalanceResponseResult, NostrWalletConnectURI, PayInvoiceResponseResult,
+    self, GetBalanceResponseResult, NIP47Error, NostrWalletConnectURI, PayInvoiceResponseResult,
 };
 use nostr_sdk::{Client, Event, EventBuilder, EventId, JsonUtil, Keys, Kind, Tag, Url};
 use tokio::sync::Mutex;
@@ -79,6 +79,68 @@ impl ClnNwc {
             cln_rpc: Arc::new(Mutex::new(cln_client)),
             nostr_client: client,
         })
+    }
+
+    /// Checks that it is a valid event and from an authorized pubkey
+    pub async fn verify_event(&self, event: &Event) -> Result<Request> {
+        if event.verify().is_err() {
+            log::info!("Event {} is invalid", event.id.to_hex());
+            bail!("Event is not a valid nostr event")
+        }
+
+        // Decrypt bolt11 from content (NIP04)
+        let content = match decrypt(
+            &self.nwc_keys.secret_key()?.clone(),
+            &self.client_keys.public_key(),
+            &event.content,
+        ) {
+            Ok(content) => content,
+            Err(err) => {
+                log::info!("Could not decrypt: {err}");
+                bail!("Could not decrypt event");
+            }
+        };
+
+        let request = match nip47::Request::from_json(&content) {
+            Ok(req) => req,
+            Err(err) => {
+                log::warn!("Could not decode request {:?}", err);
+                bail!("Could not decrypt event");
+            }
+        };
+
+        // Check event is from correct pubkey
+        if event.pubkey.ne(&self.client_keys.public_key()) {
+            log::info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
+            let response = nip47::Response {
+                result_type: request.method,
+                error: Some(NIP47Error {
+                    code: nip47::ErrorCode::Unauthorized,
+                    message: "Unauthorized pubkey".to_string(),
+                }),
+                result: None,
+            };
+
+            let encrypted_response = encrypt(
+                self.nwc_keys.secret_key()?,
+                &self.client_keys.public_key(),
+                response.as_json(),
+            );
+            let event_builder = EventBuilder::new(
+                Kind::WalletConnectResponse,
+                encrypted_response?,
+                [
+                    Tag::public_key(self.client_keys.public_key()),
+                    Tag::event(event.id),
+                ],
+            );
+
+            let event = event_builder.to_event(&self.nwc_keys)?;
+
+            self.nostr_client.send_event(event).await?;
+        }
+
+        Ok(request)
     }
 
     pub async fn auth(&self, challenge: &str, relay: Url) -> Result<()> {
