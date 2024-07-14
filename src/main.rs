@@ -1,4 +1,5 @@
 use std::net::TcpStream;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -13,12 +14,10 @@ use dirs::config_dir;
 use futures::{Stream, StreamExt};
 use limits::Limits;
 use log::{info, warn};
-use nostr_sdk::nips::nip04::{decrypt, encrypt};
+use nostr_sdk::nips::nip04::decrypt;
 use nostr_sdk::nips::nip47;
-use nostr_sdk::prelude::{GetBalanceResponseResult, PayInvoiceResponseResult};
 use nostr_sdk::{
-    ClientMessage, EventBuilder, EventId, Filter, JsonUtil, Kind, PublicKey, RelayMessage,
-    SecretKey, SubscriptionId, Tag, Url,
+    ClientMessage, Filter, JsonUtil, Keys, Kind, PublicKey, RelayMessage, SubscriptionId, Url,
 };
 use tokio::io::{stdin, stdout};
 use tokio::sync::Mutex;
@@ -27,10 +26,9 @@ use tungstenite::{connect, Message as WsMessage, WebSocket};
 
 mod cln_nwc;
 mod limits;
-mod utils;
 
 // Config Names
-const WALLET_NSEC: &str = "nostr_connect_wallet_nsec";
+const NWC_SECRET: &str = "nostr_connect_wallet_secret";
 const CLIENT_SECRET: &str = "nostr_connect_client_secret";
 const RELAY: &str = "nostr_connect_relay";
 const MAX_INVOICE_SAT: &str = "nostr_connect_max_invoice_sat";
@@ -54,10 +52,10 @@ async fn main() -> anyhow::Result<()> {
         ConfigOption::new_str_with_default(RELAY, "ws://localhost:8080", "Default nostr relay");
 
     let client_secret_option =
-        ConfigOption::new_str_no_default(CLIENT_SECRET, "Nostr pubkey to accept requests from");
+        ConfigOption::new_str_no_default(CLIENT_SECRET, "Secret the nostr client will use to send and receive messages. Can be nsec of 32 byte hex encoded");
 
-    let wallet_nsec_option =
-        ConfigOption::new_str_no_default(WALLET_NSEC, "Nsec to publish success/failure events");
+    let nwc_secret_option =
+        ConfigOption::new_str_no_default(NWC_SECRET, "Secret that the plugin will use to send and receive messages. Can be nsec or 32 byte hex encoded");
 
     let max_invoice_option = ConfigOption::new_i64_with_default(
         MAX_INVOICE_SAT,
@@ -66,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let plugin = if let Some(plugin) = cln_plugin::Builder::new(stdin(), stdout())
-        .option(wallet_nsec_option.clone())
+        .option(nwc_secret_option.clone())
         .option(client_secret_option.clone())
         // TODO: Would be better to be a list
         .option(relay_option.clone())
@@ -101,51 +99,19 @@ async fn main() -> anyhow::Result<()> {
     };
 
     info!("Nostr Wallet Connect Config: {:?}", config_path);
+    let nwc_keys = plugin
+        .option(&nwc_secret_option)
+        .expect("NWC Secret must be defined")
+        .expect("NWC Secret must be defined");
 
-    // Wallet key keys
-    // If key is defined in CLN config that is used if not checks if key in plugin
-    // config if no key found generate a new key and write to config
-    let keys = match plugin.option(&wallet_nsec_option) {
-        Ok(Some(wallet_nsec)) => utils::handle_keys(Some(wallet_nsec))?,
-        _ => {
-            let wallet_nsec = match utils::read_from_config("WALLET_NSEC", &config_path) {
-                Ok(nsec) => nsec,
-                Err(_) => None,
-            };
+    let nwc_keys = Keys::from_str(&nwc_keys)?;
 
-            let keys = utils::handle_keys(wallet_nsec)?;
+    let client_keys = plugin
+        .option(&client_secret_option)
+        .expect("Client Secret must be defined")
+        .expect("Client Secret must be defined");
 
-            if let Err(err) = utils::write_to_config(
-                "WALLET_NSEC",
-                &keys.secret_key()?.display_secret().to_string(),
-                &config_path,
-            ) {
-                warn!("Could not write to config: {:?}", err);
-            };
-
-            keys
-        }
-    };
-
-    let connect_client_keys = match plugin.option(&client_secret_option) {
-        Ok(Some(client_secret)) => utils::handle_keys(Some(client_secret))?,
-        _ => {
-            let client_secret = match utils::read_from_config("CLIENT_SECRET", &config_path) {
-                Ok(secret) => secret,
-                Err(_) => None,
-            };
-
-            let keys = utils::handle_keys(client_secret)?;
-
-            utils::write_to_config(
-                "CLIENT_SECRET",
-                &keys.secret_key()?.display_secret().to_string(),
-                &config_path,
-            )
-            .ok();
-            keys
-        }
-    };
+    let client_keys = Keys::from_str(&client_keys)?;
 
     let nostr_relay = plugin
         .option(&relay_option)
@@ -164,50 +130,44 @@ async fn main() -> anyhow::Result<()> {
     // Relay to listen for events and publish events to
     let relay = Url::from_str(&nostr_relay)?;
 
-    let client = utils::create_client(&keys, vec![relay.to_string()]).await?;
+    //let client = utils::create_client(&keys, vec![relay.to_string()]).await?;
 
-    let wallet_connect_uri: nip47::NostrWalletConnectURI = nip47::NostrWalletConnectURI::new(
-        keys.public_key(),
-        relay.clone(),
-        connect_client_keys.secret_key()?.clone(),
-        None,
-    );
-
-    log::info!("{}", wallet_connect_uri.to_string());
     let limits = Limits::new(
         Amount::from_sat(max_invoice_amount as u64),
         Amount::from_sat(hour_limit as u64),
         Amount::from_sat(day_limit as u64),
     );
 
-    let cln_nwc = ClnNwc::new(limits, rpc_socket).await?;
-
-    // Publish Wallet Connect info
-    let info_event =
-        EventBuilder::new(Kind::WalletConnectInfo, "pay_invoice", vec![]).to_event(&keys)?;
-
+    let cln_nwc = ClnNwc::new(
+        client_keys.clone(),
+        nwc_keys.clone(),
+        relay.clone(),
+        limits,
+        rpc_socket,
+    )
+    .await?;
+    /*
+        // Publish Wallet Connect info
+        let info_event =
+            EventBuilder::new(Kind::WalletConnectInfo, "pay_invoice", vec![]).to_event(&nkeys)?;
+    */
     // Publish info Event
-    client.send_event(info_event).await?;
-
+    //client.send_event(info_event).await?;
+    let relay_clone = relay.clone();
     loop {
-        let mut events = match event_stream(connect_client_keys.public_key(), relay.clone()).await {
-            Ok(stream) => stream,
-            Err(err) => {
-                warn!("Event Stream Error: {:?}", err);
-                continue;
-            }
-        };
+        let mut events =
+            match event_stream(client_keys.clone().public_key(), relay_clone.clone()).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    warn!("Event Stream Error: {:?}", err);
+                    continue;
+                }
+            };
 
         while let Some(msg) = events.next().await {
             match msg {
                 RelayMessage::Auth { challenge } => {
-                    if let Ok(auth_event) =
-                        EventBuilder::auth(challenge, relay.clone()).to_event(&keys)
-                    {
-                        if let Err(err) = client.send_event(auth_event).await {
-                            warn!("Could not broadcast event: {err}");
-                        }
-                    }
+                    cln_nwc.auth(&challenge, relay_clone.clone()).await.ok();
                 }
                 RelayMessage::Event {
                     subscription_id: _,
@@ -222,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
                     // info!("Got event: {:?}", serde_json::to_string_pretty(&event));
 
                     // Check event is from correct pubkey
-                    if event.pubkey.ne(&connect_client_keys.public_key()) {
+                    if event.pubkey.ne(&client_keys.public_key()) {
                         // TODO: Should respond with unauth
                         info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
                         continue;
@@ -230,8 +190,8 @@ async fn main() -> anyhow::Result<()> {
 
                     // Decrypt bolt11 from content (NIP04)
                     let content = match decrypt(
-                        &keys.secret_key()?.clone(),
-                        &connect_client_keys.public_key(),
+                        &nwc_keys.secret_key()?.clone(),
+                        &client_keys.public_key(),
                         &event.content,
                     ) {
                         Ok(content) => content,
@@ -252,57 +212,30 @@ async fn main() -> anyhow::Result<()> {
                     };
                     // info!("request: {:?}", request);
 
-                    let event_builder = match request.params {
+                    match request.params {
                         nip47::RequestParams::PayInvoice(pay_invoice_param) => {
-                            match cln_nwc.pay_invoice(pay_invoice_param.invoice).await {
-                                Ok(preimage) => create_success_note(
-                                    &event.pubkey,
-                                    &event.id,
-                                    keys.secret_key()?,
-                                    preimage,
-                                ),
-                                Err(err) => create_failure_note(
-                                    &event.pubkey,
-                                    &event.id,
-                                    keys.secret_key()?,
-                                    &err.to_string(),
-                                ),
+                            match cln_nwc
+                                .pay_invoice(event.id, pay_invoice_param.invoice)
+                                .await
+                            {
+                                Ok(_) => {
+                                    log::info!("Paid invoice for event: {}", event.id);
+                                }
+                                Err(_) => {
+                                    log::error!("Failed to pay invoice for event {}", event.id);
+                                }
                             }
                         }
-                        nip47::RequestParams::GetBalance => match cln_nwc.get_balance().await {
-                            Ok(amount) => {
-                                let response = nip47::Response {
-                                    result_type: nip47::Method::GetBalance,
-                                    error: None,
-                                    result: Some(nip47::ResponseResult::GetBalance(
-                                        GetBalanceResponseResult {
-                                            balance: amount.msat(),
-                                        },
-                                    )),
-                                };
-
-                                let encrypted_response = encrypt(
-                                    &keys.secret_key()?.clone(),
-                                    &event.pubkey,
-                                    response.as_json(),
-                                )?;
-
-                                Ok(EventBuilder::new(
-                                    Kind::WalletConnectResponse,
-                                    encrypted_response,
-                                    vec![
-                                        Tag::public_key(event.pubkey.to_owned()),
-                                        Tag::event(event.id.to_owned()),
-                                    ],
-                                ))
+                        nip47::RequestParams::GetBalance => {
+                            match cln_nwc.get_balance(event.deref()).await {
+                                Ok(_) => {
+                                    log::info!("Got balance for: {}", event.id);
+                                }
+                                Err(_) => {
+                                    log::info!("Failed to get balance for event {}:", event.id);
+                                }
                             }
-                            Err(_) => create_failure_note(
-                                &event.pubkey,
-                                &event.id,
-                                keys.secret_key()?,
-                                "CL RPC Error",
-                            ),
-                        },
+                        }
                         nip47::RequestParams::MakeInvoice(_) => {
                             bail!("NIP47 Make invoice is not implemented")
                         }
@@ -324,39 +257,6 @@ async fn main() -> anyhow::Result<()> {
                         nip47::RequestParams::GetInfo => {
                             bail!("NIP47 Get info is not implemented")
                         }
-                    };
-
-                    // Build event response
-                    let event_builder = match event_builder {
-                        Ok(event_builder) => {
-                            // Add spend value to daily and hourly limit tracking
-                            info!("Payment success: {}", event.id);
-                            event_builder
-                        }
-                        Err(err) => {
-                            warn!("Failed: {}, RPC Error: {}", event.id, err);
-
-                            match create_failure_note(
-                                &event.pubkey,
-                                &event.id,
-                                &keys.secret_key()?.clone(),
-                                "CLN RPC Error",
-                            ) {
-                                Ok(note) => note,
-                                Err(err) => {
-                                    warn!("Could not create failure note: {:?}", err);
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-
-                    if let Ok(event) = event_builder.to_event(&keys) {
-                        if let Err(err) = client.send_event(event).await {
-                            warn!("Could not broadcast event: {}", err);
-                        }
-                    } else {
-                        info!("Could not create event");
                     }
                 }
                 _ => continue,
@@ -366,59 +266,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     //    Ok(())
-}
-
-/// Build NIP47 success event
-fn create_success_note(
-    connect_client_pubkey: &PublicKey,
-    request_id: &EventId,
-    connect_sk: &SecretKey,
-    preimage: String,
-) -> Result<EventBuilder> {
-    let response = nip47::Response {
-        result_type: nip47::Method::PayInvoice,
-        error: None,
-        result: Some(nip47::ResponseResult::PayInvoice(
-            PayInvoiceResponseResult { preimage },
-        )),
-    };
-
-    let encrypted_response = encrypt(connect_sk, connect_client_pubkey, response.as_json());
-    Ok(EventBuilder::new(
-        Kind::WalletConnectResponse,
-        encrypted_response?,
-        [
-            Tag::public_key(connect_client_pubkey.to_owned()),
-            Tag::event(request_id.to_owned()),
-        ],
-    ))
-}
-
-/// Build NIP47 failure event
-fn create_failure_note(
-    connect_client_pubkey: &PublicKey,
-    request_id: &EventId,
-    connect_sk: &SecretKey,
-    reason: &str,
-) -> Result<EventBuilder> {
-    let response = nip47::Response {
-        result_type: nip47::Method::PayInvoice,
-        error: Some(nip47::NIP47Error {
-            code: nip47::ErrorCode::Internal,
-            message: reason.to_string(),
-        }),
-        result: None,
-    };
-
-    let encrypted_response = encrypt(connect_sk, connect_client_pubkey, response.as_json())?;
-    Ok(EventBuilder::new(
-        Kind::WalletConnectResponse,
-        encrypted_response,
-        [
-            Tag::public_key(connect_client_pubkey.to_owned()),
-            Tag::event(request_id.to_owned()),
-        ],
-    ))
 }
 
 async fn connect_relay(

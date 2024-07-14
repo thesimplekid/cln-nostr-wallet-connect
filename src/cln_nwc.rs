@@ -3,40 +3,33 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use anyhow::{anyhow, bail, Result};
 use cln_rpc::model::requests::{ListfundsRequest, PayRequest};
 use cln_rpc::model::responses::PayStatus;
 use cln_rpc::model::Response;
 use cln_rpc::primitives::Amount;
 use cln_rpc::Request;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
-use thiserror::Error;
+use nostr_sdk::nips::nip04::encrypt;
+use nostr_sdk::nips::nip47::{
+    self, GetBalanceResponseResult, NostrWalletConnectURI, PayInvoiceResponseResult,
+};
+use nostr_sdk::{Client, Event, EventBuilder, EventId, JsonUtil, Keys, Kind, Tag, Url};
 use tokio::sync::Mutex;
 
 use crate::Limits;
 
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Limit exceeded")]
-    LimitExceeded,
-    #[error("Invoice max amount")]
-    InvoiceOverMaxAmount,
-    #[error("Invoice amount undefinded")]
-    InvoiceAmountundefinded,
-    #[error("Invalid Invoice")]
-    InvalidInvoice,
-    #[error("Payment Pending")]
-    PaymentPending,
-    #[error("Payment Failed")]
-    PaymentFailed,
-    #[error("Wrong Cln response")]
-    WrongClnResponse,
-    #[error("RPC Error")]
-    RpcErrorResponse,
-}
-
+#[derive(Clone)]
 pub struct ClnNwc {
+    /// Keys that the connecting nostr client will use to send messages
+    client_keys: Keys,
+    /// Keys that the nwc plugin will use to send and receive messages
+    nwc_keys: Keys,
+    relay: Url,
     limits: Limits,
+    nwc_url: NostrWalletConnectURI,
     cln_rpc: Arc<Mutex<cln_rpc::ClnRpc>>,
+    nostr_client: Client,
 }
 
 impl fmt::Debug for ClnNwc {
@@ -54,27 +47,63 @@ impl fmt::Display for ClnNwc {
 }
 
 impl ClnNwc {
-    pub async fn new(limits: Limits, cln_rpc_socket: PathBuf) -> Result<Self, Error> {
+    pub async fn new(
+        client_keys: Keys,
+        nwc_keys: Keys,
+        relay: Url,
+        limits: Limits,
+        cln_rpc_socket: PathBuf,
+    ) -> Result<Self> {
         let cln_client = cln_rpc::ClnRpc::new(&cln_rpc_socket).await.map_err(|err| {
             log::error!("Could not start cln rpc: {}", err);
-            Error::RpcErrorResponse
+            anyhow!("Could not start cln rpc")
         })?;
 
+        let wallet_connect_uri = NostrWalletConnectURI::new(
+            nwc_keys.public_key(),
+            relay.clone(),
+            client_keys.secret_key()?.clone(),
+            None,
+        );
+
+        let client = Client::new(nwc_keys.clone());
+        client.add_relay(relay.clone()).await?;
+        client.connect().await;
+
         Ok(Self {
+            client_keys,
+            nwc_keys,
+            relay,
             limits,
+            nwc_url: wallet_connect_uri,
             cln_rpc: Arc::new(Mutex::new(cln_client)),
+            nostr_client: client,
         })
     }
 
-    pub async fn pay_invoice<S>(&self, invoice: S) -> Result<String, Error>
+    pub async fn auth(&self, challenge: &str, relay: Url) -> Result<()> {
+        if let Ok(auth_event) =
+            EventBuilder::auth(challenge, relay.clone()).to_event(&self.nwc_keys)
+        {
+            if let Err(err) = self.nostr_client.send_event(auth_event).await {
+                log::warn!("Could not broadcast event: {err}");
+                bail!("Could not broadcast auth event")
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn pay_invoice<S>(&self, event_id: EventId, invoice: S) -> anyhow::Result<()>
     where
         S: Into<String>,
     {
-        let bolt11 = Bolt11Invoice::from_str(&invoice.into()).map_err(|_| Error::InvalidInvoice)?;
+        let bolt11 =
+            Bolt11Invoice::from_str(&invoice.into()).map_err(|_| anyhow!("Invalid invoice"))?;
 
         let amount = bolt11
             .amount_milli_satoshis()
-            .ok_or(Error::InvoiceAmountundefinded)?;
+            .ok_or(anyhow!("Invoice amount is not defined"))?;
 
         let mut limits = self.limits;
         let amount = Amount::from_msat(amount);
@@ -82,7 +111,7 @@ impl ClnNwc {
         // Check amount is < then config max
         if amount.msat().gt(&(limits.max_invoice.msat())) {
             log::info!("Invoice too large: {amount:?} > {:?}", limits.max_invoice);
-            return Err(Error::InvoiceOverMaxAmount);
+            bail!("Limit too large");
         }
 
         // Check spend does not exceed daily or hourly limit
@@ -99,7 +128,7 @@ impl ClnNwc {
                 limits.day_limit.msat(),
                 limits.day_value.msat()
             );
-            return Err(Error::LimitExceeded);
+            bail!("Limits exceeded");
         }
 
         // Currently there is some debate over whether the description hash should be
@@ -136,39 +165,65 @@ impl ClnNwc {
             }))
             .await;
 
-        match cln_response {
+        let event_builder = match cln_response {
             Ok(Response::Pay(res)) => {
                 // Add spend value to daily and hourly limit tracking
                 match res.status {
                     PayStatus::COMPLETE => {
                         limits.add_spend(amount);
-                        Ok(hex::encode(res.payment_preimage.to_vec()))
+                        let preimage = hex::encode(res.payment_preimage.to_vec());
+                        let response = nip47::Response {
+                            result_type: nip47::Method::PayInvoice,
+                            error: None,
+                            result: Some(nip47::ResponseResult::PayInvoice(
+                                PayInvoiceResponseResult { preimage },
+                            )),
+                        };
+
+                        let encrypted_response = encrypt(
+                            self.nwc_keys.secret_key()?,
+                            &self.client_keys.public_key(),
+                            response.as_json(),
+                        );
+                        EventBuilder::new(
+                            Kind::WalletConnectResponse,
+                            encrypted_response?,
+                            [
+                                Tag::public_key(self.client_keys.public_key()),
+                                Tag::event(event_id),
+                            ],
+                        )
                     }
                     PayStatus::PENDING => {
                         log::info!("CLN returned pending response");
                         limits.add_spend(amount);
-                        Err(Error::PaymentPending)
+                        bail!("Payment pending");
                     }
                     PayStatus::FAILED => {
                         log::error!("Payment failed: {}", bolt11.payment_hash());
-                        Err(Error::PaymentFailed)
+                        bail!("Payment Failed");
                     }
                 }
             }
             Ok(response) => {
                 log::error!("Wrong cln response for pay request: {:?}", response);
-                Err(Error::WrongClnResponse)
+                bail!("Wrong CLN response")
             }
             Err(err) => {
                 log::error!("Cln error response for pay: {:?}", err);
-                Err(Error::RpcErrorResponse)
+                bail!("Rpc error response")
             }
-        }
+        };
 
+        let event = event_builder.to_event(&self.nwc_keys)?;
+
+        self.nostr_client.send_event(event).await?;
+
+        Ok(())
         // Build event response
     }
 
-    pub async fn get_balance(&self) -> Result<Amount, Error> {
+    pub async fn get_balance(&self, event: &Event) -> anyhow::Result<()> {
         let cln_response = self
             .cln_rpc
             .lock()
@@ -176,7 +231,7 @@ impl ClnNwc {
             .call(Request::ListFunds(ListfundsRequest { spent: None }))
             .await;
 
-        match cln_response {
+        let event_builder = match cln_response {
             Ok(Response::ListFunds(funds)) => {
                 let balance: u64 = funds
                     .channels
@@ -185,17 +240,44 @@ impl ClnNwc {
                     .sum();
 
                 let balance = Amount::from_msat(balance);
+                let response = nip47::Response {
+                    result_type: nip47::Method::GetBalance,
+                    error: None,
+                    result: Some(nip47::ResponseResult::GetBalance(
+                        GetBalanceResponseResult {
+                            balance: balance.msat(),
+                        },
+                    )),
+                };
 
-                Ok(balance)
+                let encrypted_response = encrypt(
+                    &self.nwc_keys.secret_key()?.clone(),
+                    &event.pubkey,
+                    response.as_json(),
+                )?;
+
+                EventBuilder::new(
+                    Kind::WalletConnectResponse,
+                    encrypted_response,
+                    vec![
+                        Tag::public_key(event.pubkey.to_owned()),
+                        Tag::event(event.id.to_owned()),
+                    ],
+                )
             }
             Ok(response) => {
                 log::error!("Wrong cln response for pay request: {:?}", response);
-                Err(Error::WrongClnResponse)
+                bail!("Wrong CLN response")
             }
             Err(err) => {
                 log::error!("Cln error response for pay: {:?}", err);
-                Err(Error::RpcErrorResponse)
+                bail!("Rpc error response")
             }
-        }
+        };
+
+        let event = event_builder.to_event(&self.nwc_keys)?;
+
+        self.nostr_client.send_event(event).await?;
+        Ok(())
     }
 }
