@@ -36,7 +36,6 @@ const CONFIG_PATH: &str = "nostr_connect_config_path";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing::info!("Starting cln-nostr-connect");
     let config_option =
         ConfigOption::new_str_no_default(CONFIG_PATH, "Nostr wallet connect config path");
 
@@ -69,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         .option(max_invoice_option.clone())
         .option(hour_limt_option.clone())
         .option(day_limit_option.clone())
+        .with_logging(true)
         .option(config_option.clone())
         .subscribe("shutdown",
             // Handle CLN `shutdown` if it is sent 
@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         return Ok(());
     };
+    tracing::info!("Starting cln-nostr-connect");
 
     let rpc_socket: PathBuf = plugin.configuration().rpc_file.parse()?;
 
