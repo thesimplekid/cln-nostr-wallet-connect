@@ -26,13 +26,13 @@ mod cln_nwc;
 mod limits;
 
 // Config Names
-const NWC_SECRET: &str = "nostr_connect_wallet_secret";
-const CLIENT_SECRET: &str = "nostr_connect_client_secret";
-const RELAY: &str = "nostr_connect_relay";
-const MAX_INVOICE_SAT: &str = "nostr_connect_max_invoice_sat";
-const HOUR_LIMIT_SAT: &str = "nostr_connect_hour_limit_sat";
-const DAY_LIMIT_SAT: &str = "nostr_connect_day_limit_sat";
-const CONFIG_PATH: &str = "nostr_connect_config_path";
+const NWC_SECRET: &str = "nostr-connect-wallet-secret";
+const CLIENT_SECRET: &str = "nostr-connect-client-secret";
+const RELAY: &str = "nostr_connect-relay";
+const MAX_INVOICE_SAT: &str = "nostr-connect-max-invoice-sat";
+const HOUR_LIMIT_SAT: &str = "nostr-connect-hour-limit-sat";
+const DAY_LIMIT_SAT: &str = "nostr-connect-day-limit-sat";
+const CONFIG_PATH: &str = "nostr-connect-config-path";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
