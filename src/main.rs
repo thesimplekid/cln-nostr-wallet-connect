@@ -28,7 +28,7 @@ mod limits;
 // Config Names
 const NWC_SECRET: &str = "nostr-connect-wallet-secret";
 const CLIENT_SECRET: &str = "nostr-connect-client-secret";
-const RELAY: &str = "nostr_connect-relay";
+const RELAY: &str = "nostr-connect-relay";
 const MAX_INVOICE_SAT: &str = "nostr-connect-max-invoice-sat";
 const HOUR_LIMIT_SAT: &str = "nostr-connect-hour-limit-sat";
 const DAY_LIMIT_SAT: &str = "nostr-connect-day-limit-sat";
