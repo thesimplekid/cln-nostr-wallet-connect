@@ -11,16 +11,18 @@ description = "Core Lightning plugin for paying invoices with nostr connect (NIP
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.69"
-log = "0.4"
-cln-plugin = "0.1.2"
-cln-rpc = "0.1.2"
+anyhow = "1"
+thiserror = "1"
+cln-plugin = "0.1.9"
+cln-rpc = "0.1.9"
 futures = "0.3.26"
 serde = "1"
 serde_json = "1"
-tokio = { version = "1.26.0", features = [ "full" ] }
-nostr-sdk = { version = "0.23.0", default_features = false, features = ["nip19", "nip47"] }
-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"]}
-dirs = "5.0.0"
+tokio = { version = "1", features = [ "full" ] }
+nostr-sdk = { version = "0.32", default_features = false, features = [ "nip47" ] }
+tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"]}
+dirs = "5.0.1"
 hex = "0.4.3"
-lightning-invoice = "0.24.0"
+lightning-invoice = "0.31.0"
+tracing = { version = "0.1.40", features = ["log"] }
+tracing-subscriber = "0.3.18"

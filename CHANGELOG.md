@@ -1,5 +1,11 @@
 # Changelog
 
+[Unreleased]
+
+## Change
+- Update cln-rpc
+- Update cln-plugin
+- Update nostr-sdk
 
 ## [0.2.3]
 ### Fixed
