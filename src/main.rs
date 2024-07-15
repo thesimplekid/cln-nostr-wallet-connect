@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         "Max size of an invoice (msat)",
     );
 
-    let plugin = if let Some(plugin) = cln_plugin::Builder::new(stdin(), stdout())
+    let confplugin = match cln_plugin::Builder::new(stdin(), stdout())
         .option(nwc_secret_option.clone())
         .option(client_secret_option.clone())
         // TODO: Would be better to be a list
@@ -77,19 +77,19 @@ async fn main() -> anyhow::Result<()> {
             plugin.shutdown().ok();
             plugin.join().await
         })
-        .dynamic()
-        .start(())
-        .await?
+        .dynamic().configure().await?
     {
-        plugin
-    } else {
-        return Ok(());
+        Some(plugin) => {
+            plugin
+        }
+        None => {
+            bail!("Could not configure");
+        }
     };
+
     tracing::info!("Starting cln-nostr-connect");
 
-    let rpc_socket: PathBuf = plugin.configuration().rpc_file.parse()?;
-
-    let config_path = match plugin.option(&config_option) {
+    let config_path = match &confplugin.option(&config_option) {
         Ok(Some(config_path)) => PathBuf::from_str(&config_path)?,
         _ => config_dir()
             .unwrap()
@@ -98,33 +98,37 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tracing::info!("Nostr Wallet Connect Config: {:?}", config_path);
-    let nwc_keys = plugin
+    let nwc_keys = confplugin
         .option(&nwc_secret_option)
         .expect("NWC Secret must be defined")
         .expect("NWC Secret must be defined");
 
     let nwc_keys = Keys::from_str(&nwc_keys)?;
 
-    let client_keys = plugin
+    let client_keys = confplugin
         .option(&client_secret_option)
         .expect("Client Secret must be defined")
         .expect("Client Secret must be defined");
 
     let client_keys = Keys::from_str(&client_keys)?;
 
-    let nostr_relay = plugin
+    let nostr_relay = confplugin
         .option(&relay_option)
         .expect("Option is defined")
         .as_str()
         .to_owned();
 
-    let max_invoice_amount = plugin
+    let max_invoice_amount = confplugin
         .option(&max_invoice_option)
         .expect("Option is defined");
 
-    let hour_limit = plugin.option(&hour_limt_option).expect("Option is defined");
+    let hour_limit = confplugin
+        .option(&hour_limt_option)
+        .expect("Option is defined");
 
-    let day_limit = plugin.option(&day_limit_option).expect("Option is defined");
+    let day_limit = confplugin
+        .option(&day_limit_option)
+        .expect("Option is defined");
 
     // Relay to listen for events and publish events to
     let relay = Url::from_str(&nostr_relay)?;
@@ -136,6 +140,10 @@ async fn main() -> anyhow::Result<()> {
         Amount::from_sat(hour_limit as u64),
         Amount::from_sat(day_limit as u64),
     );
+
+    let rpc_socket: PathBuf = confplugin.configuration().rpc_file.parse()?;
+
+    confplugin.start(()).await?;
 
     let cln_nwc = ClnNwc::new(
         client_keys.clone(),
