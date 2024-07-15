@@ -55,7 +55,7 @@ impl ClnNwc {
         cln_rpc_socket: PathBuf,
     ) -> Result<Self> {
         let cln_client = cln_rpc::ClnRpc::new(&cln_rpc_socket).await.map_err(|err| {
-            log::error!("Could not start cln rpc: {}", err);
+            tracing::error!("Could not start cln rpc: {}", err);
             anyhow!("Could not start cln rpc")
         })?;
 
@@ -65,6 +65,8 @@ impl ClnNwc {
             client_keys.secret_key()?.clone(),
             None,
         );
+        tracing::info!("URL: {}", wallet_connect_uri.to_string());
+        println!("URL: {}", wallet_connect_uri.to_string());
 
         let client = Client::new(nwc_keys.clone());
         client.add_relay(relay.clone()).await?;
@@ -84,7 +86,7 @@ impl ClnNwc {
     /// Checks that it is a valid event and from an authorized pubkey
     pub async fn verify_event(&self, event: &Event) -> Result<Request> {
         if event.verify().is_err() {
-            log::info!("Event {} is invalid", event.id.to_hex());
+            tracing::info!("Event {} is invalid", event.id.to_hex());
             bail!("Event is not a valid nostr event")
         }
 
@@ -96,7 +98,7 @@ impl ClnNwc {
         ) {
             Ok(content) => content,
             Err(err) => {
-                log::info!("Could not decrypt: {err}");
+                tracing::info!("Could not decrypt: {err}");
                 bail!("Could not decrypt event");
             }
         };
@@ -104,14 +106,14 @@ impl ClnNwc {
         let request = match nip47::Request::from_json(&content) {
             Ok(req) => req,
             Err(err) => {
-                log::warn!("Could not decode request {:?}", err);
+                tracing::warn!("Could not decode request {:?}", err);
                 bail!("Could not decrypt event");
             }
         };
 
         // Check event is from correct pubkey
         if event.pubkey.ne(&self.client_keys.public_key()) {
-            log::info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
+            tracing::info!("Event from incorrect pubkey: {}", event.pubkey.to_string());
             let response = nip47::Response {
                 result_type: request.method,
                 error: Some(NIP47Error {
@@ -148,7 +150,7 @@ impl ClnNwc {
             EventBuilder::auth(challenge, relay.clone()).to_event(&self.nwc_keys)
         {
             if let Err(err) = self.nostr_client.send_event(auth_event).await {
-                log::warn!("Could not broadcast event: {err}");
+                tracing::warn!("Could not broadcast event: {err}");
                 bail!("Could not broadcast auth event")
             }
         }
@@ -172,20 +174,20 @@ impl ClnNwc {
 
         // Check amount is < then config max
         if amount.msat().gt(&(limits.max_invoice.msat())) {
-            log::info!("Invoice too large: {amount:?} > {:?}", limits.max_invoice);
+            tracing::info!("Invoice too large: {amount:?} > {:?}", limits.max_invoice);
             bail!("Limit too large");
         }
 
         // Check spend does not exceed daily or hourly limit
         if limits.check_limit(amount).is_err() {
-            log::info!("Sending {} msat will exceed limit", amount.msat());
-            log::info!(
+            tracing::info!("Sending {} msat will exceed limit", amount.msat());
+            tracing::info!(
                 "Hour limit: {} msats, Hour spent: {} msats",
                 limits.hour_limit.msat(),
                 limits.hour_value.msat()
             );
 
-            log::info!(
+            tracing::info!(
                 "Day limit: {} msats, Day Spent: {} msats",
                 limits.day_limit.msat(),
                 limits.day_value.msat()
@@ -204,8 +206,8 @@ impl ClnNwc {
             Bolt11InvoiceDescription::Hash(hash) => hash.0.to_string(),
         };
 
-        log::debug!("Pay invoice request: {}", bolt11);
-        // Send payment
+        tracing::debug!("Pay invoice request: {}", bolt11);
+        // Sendpayment
         let cln_response = self
             .cln_rpc
             .lock()
@@ -257,22 +259,22 @@ impl ClnNwc {
                         )
                     }
                     PayStatus::PENDING => {
-                        log::info!("CLN returned pending response");
+                        tracing::info!("CLN returned pending response");
                         limits.add_spend(amount);
                         bail!("Payment pending");
                     }
                     PayStatus::FAILED => {
-                        log::error!("Payment failed: {}", bolt11.payment_hash());
+                        tracing::error!("Payment failed: {}", bolt11.payment_hash());
                         bail!("Payment Failed");
                     }
                 }
             }
             Ok(response) => {
-                log::error!("Wrong cln response for pay request: {:?}", response);
+                tracing::error!("Wrong cln response for pay request: {:?}", response);
                 bail!("Wrong CLN response")
             }
             Err(err) => {
-                log::error!("Cln error response for pay: {:?}", err);
+                tracing::error!("Cln error response for pay: {:?}", err);
                 bail!("Rpc error response")
             }
         };
@@ -330,11 +332,11 @@ impl ClnNwc {
                 )
             }
             Ok(response) => {
-                log::error!("Wrong cln response for pay request: {:?}", response);
+                tracing::error!("Wrong cln response for pay request: {:?}", response);
                 bail!("Wrong CLN response")
             }
             Err(err) => {
-                log::error!("Cln error response for pay: {:?}", err);
+                tracing::error!("Cln error response for pay: {:?}", err);
                 bail!("Rpc error response")
             }
         };

@@ -13,7 +13,6 @@ use cln_rpc::primitives::Amount;
 use dirs::config_dir;
 use futures::{Stream, StreamExt};
 use limits::Limits;
-use log::{info, warn};
 use nostr_sdk::nips::nip47;
 use nostr_sdk::{
     ClientMessage, Filter, JsonUtil, Keys, Kind, PublicKey, RelayMessage, SubscriptionId, Url,
@@ -37,7 +36,12 @@ const CONFIG_PATH: &str = "nostr_connect_config_path";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    info!("Starting cln-nostr-connect");
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
+    tracing::info!("Starting cln-nostr-connect");
+    println!("Starting cln");
     let config_option =
         ConfigOption::new_str_no_default(CONFIG_PATH, "Nostr wallet connect config path");
 
@@ -74,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         .subscribe("shutdown",
             // Handle CLN `shutdown` if it is sent 
             |plugin: Plugin<()>, _: serde_json::Value| async move {
-            info!("Received \"shutdown\" notification from lightningd ... requesting cln_plugin shutdown");
+            tracing::info!("Received \"shutdown\" notification from lightningd ... requesting cln_plugin shutdown");
             plugin.shutdown().ok();
             plugin.join().await
         })
@@ -97,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
             .join("config"),
     };
 
-    info!("Nostr Wallet Connect Config: {:?}", config_path);
+    tracing::info!("Nostr Wallet Connect Config: {:?}", config_path);
     let nwc_keys = plugin
         .option(&nwc_secret_option)
         .expect("NWC Secret must be defined")
@@ -158,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
             match event_stream(client_keys.clone().public_key(), relay_clone.clone()).await {
                 Ok(stream) => stream,
                 Err(err) => {
-                    warn!("Event Stream Error: {:?}", err);
+                    tracing::warn!("Event Stream Error: {:?}", err);
                     continue;
                 }
             };
@@ -174,11 +178,11 @@ async fn main() -> anyhow::Result<()> {
                 } => {
                     let request = match cln_nwc.verify_event(&event).await {
                         Ok(request) => {
-                            log::info!("Received a valid nostr event: {}", event.id);
+                            tracing::info!("Received a valid nostr event: {}", event.id);
                             request
                         }
                         Err(_) => {
-                            log::info!("Received an invalid nostr event: {}", event.id);
+                            tracing::info!("Received an invalid nostr event: {}", event.id);
                             continue;
                         }
                     };
@@ -190,20 +194,20 @@ async fn main() -> anyhow::Result<()> {
                                 .await
                             {
                                 Ok(_) => {
-                                    log::info!("Paid invoice for event: {}", event.id);
+                                    tracing::info!("Paid invoice for event: {}", event.id);
                                 }
                                 Err(_) => {
-                                    log::error!("Failed to pay invoice for event {}", event.id);
+                                    tracing::error!("Failed to pay invoice for event {}", event.id);
                                 }
                             }
                         }
                         nip47::RequestParams::GetBalance => {
                             match cln_nwc.get_balance(event.deref()).await {
                                 Ok(_) => {
-                                    log::info!("Got balance for: {}", event.id);
+                                    tracing::info!("Got balance for: {}", event.id);
                                 }
                                 Err(_) => {
-                                    log::info!("Failed to get balance for event {}:", event.id);
+                                    tracing::info!("Failed to get balance for event {}:", event.id);
                                 }
                             }
                         }
@@ -233,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
                 _ => continue,
             }
         }
-        warn!("Event stream has ended");
+        tracing::warn!("Event stream has ended");
     }
 
     //    Ok(())
@@ -260,7 +264,7 @@ async fn connect_relay(
 
             return Ok(socket);
         } else {
-            info!("Attempted connection to {} failed", url);
+            tracing::info!("Attempted connection to {} failed", url);
         }
 
         if attempt == 99 {
@@ -289,12 +293,12 @@ async fn event_stream(
                     Ok(msg) => msg,
                     Err(err) => {
                         // Handle disconnection
-                        info!("WebSocket disconnected: {}", err);
-                        info!("Attempting to reconnect ...");
+                        tracing::info!("WebSocket disconnected: {}", err);
+                        tracing::info!("Attempting to reconnect ...");
                         match connect_relay(relay.clone(), connect_client_pubkey).await {
                             Ok(new_socket) => socket = Arc::new(Mutex::new(new_socket)),
                             Err(err) => {
-                                info!("{}", err);
+                                tracing::info!("{}", err);
                                 return None;
                             }
                         }
@@ -306,7 +310,7 @@ async fn event_stream(
                 let msg_text = match msg.to_text() {
                     Ok(msg_test) => msg_test,
                     Err(_) => {
-                        info!("Failed to convert message to text");
+                        tracing::info!("Failed to convert message to text");
                         continue;
                     }
                 };
@@ -324,7 +328,7 @@ async fn event_stream(
                         _ => continue,
                     }
                 } else {
-                    info!("Got unexpected message: {:?}", msg);
+                    tracing::info!("Got unexpected message: {:?}", msg);
                 }
             }
         },

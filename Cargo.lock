@@ -368,12 +368,13 @@ dependencies = [
  "futures",
  "hex",
  "lightning-invoice",
- "log",
  "nostr-sdk",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "tungstenite",
 ]
 
