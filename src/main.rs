@@ -36,10 +36,6 @@ const CONFIG_PATH: &str = "nostr_connect_config_path";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .init();
-
     tracing::info!("Starting cln-nostr-connect");
     println!("Starting cln");
     let config_option =
