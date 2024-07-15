@@ -66,7 +66,6 @@ impl ClnNwc {
             None,
         );
         tracing::info!("URL: {}", wallet_connect_uri.to_string());
-        println!("URL: {}", wallet_connect_uri.to_string());
 
         let client = Client::new(nwc_keys.clone());
         client.add_relay(relay.clone()).await?;

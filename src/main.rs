@@ -37,7 +37,6 @@ const CONFIG_PATH: &str = "nostr_connect_config_path";
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting cln-nostr-connect");
-    println!("Starting cln");
     let config_option =
         ConfigOption::new_str_no_default(CONFIG_PATH, "Nostr wallet connect config path");
 
